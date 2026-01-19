@@ -50,8 +50,6 @@ stopme() {
 	screen -wipe
 }
 
-echo "Num of params= $#"
-
 if [ $# -ne 1 ] && [ $# -ne 2 ];
 then
 	usage $0

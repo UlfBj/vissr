@@ -109,6 +109,7 @@ func readFeederConfig(configFilename string) ConfigData {
 		configData.InfoType = "error"
 		return configData
 	}
+	configData.InfoType = "Data" // The only supported information type
 	return configData
 }
 
@@ -188,7 +189,7 @@ func feederRegister(regSockFile string, configData ConfigData) string {
 		utils.Error.Printf("feederRegister:Failed to UDS connect to the server. Err=%s", err)
 		return ""
 	}
-	request := `{"action": "reg", "name": "` + configData.Name + `", "infotype": "` + configData.InfoType + `"}`
+	request := `{"action": "reg", "name": "` + configData.Name + `"}`
 	_, err = conn.Write([]byte(request))
 	if err != nil {
 		utils.Error.Printf("feederRegister:Write failed, err = %s", err)

@@ -989,15 +989,16 @@ func configureDefault(udsConn net.Conn) {
 	}
 }
 
-func decodeFeederRegRequest(request []byte, regIndex string) FeederRegElem {  // {"action": "reg"/"dereg", "name": "xxxx", "infotype": "data"/"service"}
+func decodeFeederRegRequest(request []byte, regIndex string) FeederRegElem {  // {"action": "reg"/"dereg", "name": "xxxx"}
 	var feederRegElem FeederRegElem
 	var reqMap map[string]interface{}
 	err := json.Unmarshal(request, &reqMap)
 	if err != nil {
 		utils.Error.Printf("decodeFeederRegRequest:Feeder reg request corrupt, err = %s\nmessage=%s", err, request)
 	}
-	if (reqMap["action"] == nil || reqMap["name"] == nil || reqMap["infotype"] == nil) ||
-	   (reqMap["action"] != "reg" && reqMap["action"] != "dereg") || (reqMap["infotype"] != "Data" && reqMap["infotype"] != "Service") {
+	reqMap["infotype"] = "Data" // The only supported information type
+	if reqMap["action"] == nil || reqMap["name"] == nil ||
+	   (reqMap["action"] != "reg" && reqMap["action"] != "dereg") {
 		feederRegElem.InfoType = "error"
 	} else {
 		if reqMap["action"] == "dereg" {
