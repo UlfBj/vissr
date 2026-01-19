@@ -383,6 +383,8 @@ func issueServiceRequest(requestMap map[string]interface{}, tDChanIndex int, sDC
 			backendChan[tDChanIndex] <- errorResponseMap
 			return
 		}
+		requestMap["infoType"] = utils.GetInfoType(VSSTreeRoot)
+//utils.Info.Printf("requestMap[infoType]=%s", requestMap["infoType"].(string))
 	}
 	var searchPath []string
 	var filterList []utils.FilterObject // variant + parameter

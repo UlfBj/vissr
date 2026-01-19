@@ -1,7 +1,8 @@
 #!/bin/bash
 
 usage() {
-	echo "usage: $0 startme|stopme" >&2
+	echo "usage: $0 startme <feederConfigX.json> (name of config file for 2nd feeder)"
+	echo "usage: $0 stopme <2> (if two feeders were started)"
 }
 
 startme() {
@@ -10,24 +11,38 @@ startme() {
 	go build && mkdir -p logs
 	cd ../../
 
-	echo "Building feederv3..."
-	cd feeder/feeder-template/feederv3
+	echo "Building feederv4..."
+	cd feeder/feeder-template/feederv4
 	go build && mkdir -p logs
 	sleep 1s
 	cd ../../../
-	echo "Starting feederv3"
-	screen -S feederv3 -dm bash -c "pushd feeder/feeder-template/feederv3 && ./feederv3 -i vssjson -t speed-sawtooth.json &> ./logs/feederv3-log.txt && popd"
 
 	echo "Starting server"
 	screen -S vissv2server -dm bash -c "pushd server/vissv2server && ./vissv2server -m &> ./logs/vissv2server-log.txt && popd"
+
+	sleep 1s
+	echo "Starting feederv4"
+	screen -S feederv4 -dm bash -c "pushd feeder/feeder-template/feederv4 && ./feederv4 &> ./logs/feederv4-log.txt && popd"
+
+	sleep 1s
+	if [ $# -eq 1 ];
+	then
+		echo "Starting second feederv4"
+		screen -S feederv4_2 -dm bash -c "pushd feeder/feeder-template/feederv4 && ./feederv4 -c $1 &> ./logs/feederv4-log-2.txt && popd"
+	fi
 
 	screen -list
 }
 
 stopme() {
-	echo "Stopping feederv3"
-	screen -X -S feederv3 quit
+	echo "Stopping feederv4"
+	screen -X -S feederv4 quit
 
+	if [ $# -eq 1 ];
+	then
+		echo "Stopping second feederv4"
+		screen -X -S feederv4_2 quit
+	fi
 	echo "Stopping vissv2server"
 	screen -X -S vissv2server quit
 
@@ -35,7 +50,9 @@ stopme() {
 	screen -wipe
 }
 
-if [ $# -ne 1 ] && [ $# -ne 2 ]
+echo "Num of params= $#"
+
+if [ $# -ne 1 ] && [ $# -ne 2 ];
 then
 	usage $0
 	exit 1
@@ -44,9 +61,10 @@ fi
 case "$1" in 
 	startme)
 		stopme
-		startme $# $2;;
+		startme $2
+		;;
 	stopme)
-		stopme
+		stopme $2
 		;;
 	*)
 		usage
