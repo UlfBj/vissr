@@ -77,10 +77,24 @@ type FeederPathElem struct {
 	Reference int
 }
 var feederPathList []FeederPathElem
-var feederConnected bool
 
-//var feederConn net.Conn
-//var hostIp string
+type FeederChannelElem struct {
+	Busy bool
+	Channel chan string
+}
+var feederChannelList []FeederChannelElem
+const MAXFEEDERS = 5
+
+type FeederRegElem struct {
+	Name string
+	InfoType string
+	SockFile string
+	Conn net.Conn
+	ChannelIndex int
+}
+var feederRegList []FeederRegElem
+const FEEDER_REG_DIR = "/var/tmp/vissv2/"
+const FEEDER_REG_SOCKFILE = FEEDER_REG_DIR + "feederReg.sock"
 
 var errorResponseMap = map[string]interface{}{}
 
@@ -570,20 +584,6 @@ func setVehicleData(path string, value string) string {
 	case "memcache":
 		fallthrough
 	case "redis":
-/*		udsConn := utils.GetUdsConn(path, "serverFeeder")
-		if udsConn == nil {
-			utils.Error.Printf("setVehicleData:Failed to UDS connect to feeder for path = %s", path)
-			return ""
-		}
-		data := `{"path":"` + path + `", "dp":{"value":"` + value + `", "ts":"` + ts + `"}}`
-		_, err := udsConn.Write([]byte(data))
-		if err != nil {
-			utils.Error.Printf("setVehicleData:Write failed, err = %s", err)
-			return ""
-		}*/
-		if !feederConnected {
-			return ""
-		}
 		message := `{"action": "set", "data": {"path":"` + path + `", "dp":{"value":"` + value + `", "ts":"` + ts + `"}}}`
 		toFeeder <- message
 		return ts
@@ -967,8 +967,11 @@ func getValidation(path string) string {
 	return "read-write" //dummy return
 }
 
+/* The server creates defaultListX.json (X>=1) at startup if defaults found in any tree.
+* All feeders get all default lists, it is their responsibility to recognize the default updates that are linked to signals managed by them.
+*/
 func configureDefault(udsConn net.Conn) {
-	defaultFile := "defaultList1.json" //created at server startup if defaults found in any tree.
+	defaultFile := "defaultList1.json"
 	for i := 2; utils.FileExists(defaultFile); i++ {
 		data, err := os.ReadFile(defaultFile)
 		if err != nil {
@@ -980,30 +983,188 @@ func configureDefault(udsConn net.Conn) {
 		if err != nil {
 			utils.Error.Printf("configureDefault:Feeder write failed, err = %s", err)
 		}
-		os.Remove(defaultFile)
+//		os.Remove(defaultFile)
 		defaultFile = "defaultList" + strconv.Itoa(i) + ".json"
 		time.Sleep(50 * time.Millisecond)  // give feeder some time to process the message sent
 	}
 }
 
-func feederFrontend(toFeeder chan string, fromFeederRorC chan string, fromFeederCl chan string) {
-	var udsConn net.Conn
-	attempts := 0
-	utils.Info.Printf("feederFrontend:Trying to connect to feeder...")
-	for udsConn == nil && attempts < 10 {
-		udsConn = utils.GetUdsConn("*", "serverFeeder")
-		if udsConn == nil && attempts >= 10-1 {
-			utils.Error.Printf("feederFrontend:Failed to UDS connect to feeder.")
-			return
-		}
-		attempts++
-		time.Sleep(3 * time.Second)
+func decodeFeederRegRequest(request []byte, regIndex string) FeederRegElem {  // {"action": "reg"/"dereg", "name": "xxxx"}
+	var feederRegElem FeederRegElem
+	var reqMap map[string]interface{}
+	err := json.Unmarshal(request, &reqMap)
+	if err != nil {
+		utils.Error.Printf("decodeFeederRegRequest:Feeder reg request corrupt, err = %s\nmessage=%s", err, request)
 	}
-	feederConnected = true
-	utils.Info.Printf("feederFrontend:Connected to feeder.")
-	configureDefault(udsConn)
-	fromFeeder := make(chan string)
-	go feederReader(udsConn, fromFeeder)
+	reqMap["infotype"] = "Data" // The only supported information type
+	if reqMap["action"] == nil || reqMap["name"] == nil ||
+	   (reqMap["action"] != "reg" && reqMap["action"] != "dereg") {
+		feederRegElem.InfoType = "error"
+	} else {
+		if reqMap["action"] == "dereg" {
+			feederRegElem.InfoType = "dereg"
+		} else {
+			feederRegElem.Name = reqMap["name"].(string)
+			feederRegElem.InfoType = reqMap["infotype"].(string)
+			feederRegElem.SockFile = FEEDER_REG_DIR + "feederReg" + regIndex + ".sock"
+		}
+	}
+	return feederRegElem
+}
+
+func initFeederRegServer(feederRegChan chan FeederRegElem) {
+	os.Remove(FEEDER_REG_SOCKFILE)
+	listener, err := net.Listen("unix", FEEDER_REG_SOCKFILE)
+	if err != nil {
+		utils.Error.Printf("initFeederRegServer:UDS listen failed, err = %s", err)
+		os.Exit(-1)
+	}
+	regIndex := 1
+	var feederRegElem FeederRegElem
+	var feederNameList []string
+	buf := make([]byte, 512)
+	feederRegElem.ChannelIndex = -1
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			utils.Error.Printf("initFeederRegServer:UDS accept failed, err = %s", err)
+			feederRegElem.InfoType = "error"
+		} else {
+			n, err := conn.Read(buf)
+			if err != nil {
+				utils.Error.Printf("initFeederRegServer:Read failed, err = %s", err)
+				time.Sleep(1 * time.Second)
+				feederRegElem.InfoType = "error"
+			} else {
+				utils.Info.Printf("initFeederRegServer:Request from feeder: %s", string(buf[:n]))
+				if n > 512 {
+					utils.Error.Printf("initFeederRegServer:Max message size of 512 chars exceeded. Request dropped")
+					feederRegElem.InfoType = "error"
+				} else {
+					feederRegElem = decodeFeederRegRequest(buf[:n], strconv.Itoa(regIndex))
+					regIndex++
+				}
+utils.Info.Printf("initFeederRegServer:feederRegElem.InfoType=%s, feederRegElem.Name=%s", feederRegElem.InfoType, feederRegElem.Name)
+				var response string
+				if feederRegElem.InfoType != "error" && (feederRegElem.InfoType == "dereg" || !feederNameClash(feederNameList, feederRegElem.Name)) {
+					if feederRegElem.InfoType == "dereg" {
+						response = `{"action": "dereg"` + `, "name": ` + feederRegElem.Name + "}"
+					} else {
+						response = `{"action": "reg"` + `, "name": "` + feederRegElem.Name + `", "sockfile": "` + feederRegElem.SockFile + `"}`
+					}
+				} else {
+					response = `{"action": "error"}`
+				}
+				_, err := conn.Write([]byte(response))
+				if err != nil {
+					utils.Error.Printf("initFeederRegServer:Write failed, err = %s", err)
+					feederRegElem.InfoType = "error"
+				}
+			}
+		}
+		if feederRegElem.InfoType != "error"{
+			time.Sleep(3 * time.Second)  //wait some time for the feeder to be ready for a connect request
+			feederRegChan <- feederRegElem
+			feederRegElem = <- feederRegChan  //updated list of feeder names on Name element
+			err := json.Unmarshal([]byte(feederRegElem.Name), &feederNameList)
+			if err != nil {
+				utils.Error.Printf("initFeederRegServer:Unmarshal failed, err = %s", err)
+			}
+		}
+		conn.Close()
+	}
+}
+
+func feederNameClash(feederNameList []string, feederName string) bool {
+	for i := 0; i < len(feederNameList); i++ {
+		if feederNameList[i] == feederName {
+			return true
+		}
+	}
+	return false
+}
+
+func updateFeederRegList(feederRegElem FeederRegElem) {
+	if feederRegElem.InfoType != "dereg" {
+		feederRegList = append(feederRegList, feederRegElem)
+	} else {
+		for i := 0; i < len(feederRegList); i++ {
+			if feederRegList[i].Name == feederRegElem.Name {
+				// stäng UDS, lämna tillbaka channel,...
+				feederRegList[i].Conn.Close()
+				feederRegList[i].Conn = nil
+				freeFeederChannel(feederRegList[i].ChannelIndex)
+				feederRegList = append(feederRegList[:i], feederRegList[i+1:]...)
+			}
+		}
+	}
+}
+
+func createFeederNameList() FeederRegElem {
+	feederNameList := "["
+	for i := 0; i < len(feederRegList); i++ {
+		feederNameList += `"` + feederRegList[i].Name + `", `
+	}
+	feederNameList = feederNameList[:len(feederNameList)-2] +  "]"
+	var feederRegElem FeederRegElem
+	feederRegElem.Name = feederNameList
+	return feederRegElem
+}
+
+func getFeederChannelIndex(channelIndex int) int {
+	if channelIndex != -1 {
+		return channelIndex
+	}
+	for i := 0; i < len(feederChannelList); i++ {
+		if !feederChannelList[i].Busy {
+			feederChannelList[i].Busy = true
+			return i
+		}
+	}
+	return -1
+}
+
+func freeFeederChannel(channelIndex int) {
+	feederChannelList[channelIndex].Busy = false
+}
+
+func connectToFeeder(feederReq *FeederRegElem) {
+	utils.Info.Printf("connectToFeeder:Trying to connect to feeder...")
+	feederReq.Conn, _ = net.Dial("unix", feederReq.SockFile)
+	if feederReq.Conn == nil {
+		utils.Error.Printf("connectToFeeder:Failed to UDS connect to the feeder %s", feederReq.Name)
+		return
+	}
+	feederReq.ChannelIndex = getFeederChannelIndex(feederReq.ChannelIndex)
+	if feederReq.ChannelIndex == -1 {
+		feederReq.Conn.Close()
+		feederReq.Conn = nil
+		utils.Error.Printf("connectToFeeder:No available channel for feeder %s", feederReq.Name)
+		return
+	}
+	go feederReader(feederReq.Conn, feederReq.Name, feederReq.ChannelIndex)
+	utils.Info.Printf("connectToFeeder:Connected to the feeder %s", feederReq.Name)
+	configureDefault(feederReq.Conn)
+	return
+}
+
+func feederConnectRetry() {
+	for i := 0; i < len(feederRegList); i++ {
+		if feederRegList[i].ChannelIndex != -1 && feederChannelList[feederRegList[i].ChannelIndex].Busy && 
+		   feederChannelList[feederRegList[i].ChannelIndex].Channel == nil {
+			connectToFeeder(&feederRegList[i])
+			break
+		}
+	}
+}
+
+func feederFrontend(toFeeder chan string, fromFeederRorC chan string, fromFeederCl chan string) {
+	fromFeeders := make(chan string)
+	feederChannelList = make([]FeederChannelElem, MAXFEEDERS)
+	for i := 0; i < MAXFEEDERS; i++ {
+		feederChannelList[i].Channel = make(chan string)
+	}
+	go feederReaderMgr(fromFeeders)
 	feederNotification := "not-verified"  // possible alues ["not-verified", "not-supported", "supported"]
 	subMessageCount := 0
 	for {
@@ -1016,10 +1177,12 @@ func feederFrontend(toFeeder chan string, fromFeederRorC chan string, fromFeeder
 				if err != nil || messageMap["action"] == nil {
 					utils.Error.Printf("feederFrontend:Feeder message corrupt, err = %s\nmessage=%s", err, message)
 				} else {
+					infoType := "Data"
 					switch messageMap["action"].(string) {
 						case "subscribe":
 							if messageMap["subscriptionId"] != nil && messageMap["variant"] != nil && messageMap["path"] != nil {
-								feederSubList = addOnFeederSubList(messageMap["subscriptionId"].(string), messageMap["variant"].(string), messageMap["path"].([]interface{}))
+								feederSubList = addOnFeederSubList(messageMap["subscriptionId"].(string),
+											messageMap["variant"].(string), messageMap["path"].([]interface{}))
 								feederPathList, feederUpdatePath = addOnFeederPathList(messageMap["path"].([]interface{}))
 								if feederNotification != "not-supported" {
 									if subMessageCount >= 5 {
@@ -1048,16 +1211,22 @@ func feederFrontend(toFeeder chan string, fromFeederRorC chan string, fromFeeder
 								continue
 							}
 						case "set": // send message as is to feeder
+						case "invoke":
+							infoType = "Service"
 						default:
 							utils.Error.Printf("feederFrontend:Feeder message action unknown, message=%s", message)
 							continue
 					}
-					_, err := udsConn.Write([]byte(message))
-					if err != nil {
-						utils.Error.Printf("feederFrontend:Feeder write failed, err = %s", err)
+					for i := 0; i < len(feederRegList); i++ {
+						if feederRegList[i].Conn != nil && feederRegList[i].InfoType == infoType {
+							_, err := feederRegList[i].Conn.Write([]byte(message))
+							if err != nil {
+								utils.Error.Printf("feederFrontend:write to feeder %s failed, err = %s", feederRegList[i].Name, err)
+							}
+						}
 					}
 				}
-			case message := <- fromFeeder:
+			case message := <- fromFeeders:
 				var messageMap map[string]interface{}
 				err := json.Unmarshal([]byte(message), &messageMap)
 				if err != nil || messageMap["action"] == nil {
@@ -1195,15 +1364,29 @@ func deleteOnFeederPathList(path []string) ([]FeederPathElem, string) {
 	return feederPathList, feederUpdatePath + `"]`
 }
 
-func feederReader(udsConn net.Conn, fromFeeder chan string) {
+func feederReaderMgr(fromFeeders chan string) {
+	var message string
+	for {
+		select {  // the number of select cases must be same as MAXFEEDERS
+			case message = <-feederChannelList[0].Channel:
+			case message = <-feederChannelList[1].Channel:
+			case message = <-feederChannelList[2].Channel:
+			case message = <-feederChannelList[3].Channel:
+			case message = <-feederChannelList[4].Channel:
+		}
+		fromFeeders <- message
+	}
+}
+
+func feederReader(udsConn net.Conn, feederName string, feederChannelIndex int) {
 	buf := make([]byte, 512)
 	for {
 		nr, err := udsConn.Read(buf)
 		if err != nil {
-			utils.Error.Printf("feederReader:Read failed, err = %s", err)
+			utils.Error.Printf("feederReader:Read from %s failed, err = %s", feederName, err)
 			break
 		} else {
-			fromFeeder <- string(buf[:nr])
+			feederChannelList[feederChannelIndex].Channel <- string(buf[:nr])
 		}
 	}
 }
@@ -1211,7 +1394,6 @@ func feederReader(udsConn net.Conn, fromFeeder chan string) {
 func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, stateStorageType string, histSupport bool, dbFile string) {
 	stateDbType = stateStorageType
 	historySupport = histSupport
-	feederConnected = false
 
 	utils.ReadUdsRegistrations("uds-registration.json")
 
@@ -1330,6 +1512,8 @@ func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, state
 		go historyServer(historyAccessChannel, vss_data)
 	}*/
 	go initDataServer(serviceMgrChan, dataChan, backendChan)
+	feederRegChan := make(chan FeederRegElem)
+	go initFeederRegServer(feederRegChan)
 	toFeeder = make(chan string)
 	fromFeederRorC = make(chan string)
 	fromFeederCl = make(chan string)
@@ -1340,6 +1524,7 @@ func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, state
 		dummyTicker = time.NewTicker(47 * time.Millisecond)
 	}
 	subscriptTicker := time.NewTicker(23 * time.Millisecond) //range/change subscription ticker when no feeder notifications
+	feederReconnectTicker := time.NewTicker(2 * time.Second)
 	feederNotification := false
 	triggeredPath := ""
 
@@ -1356,6 +1541,7 @@ func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, state
 				responseMap["authorization"] = requestMap["handle"]
 			}
 			switch requestMap["action"] {
+			case "invoke": // invokeVehicleService(...
 			case "set":
 				var ts string
 				switch requestMap["value"].(type) {
@@ -1423,9 +1609,7 @@ func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, state
 				subscriptionList = activateIfIntervalOrCL(subscriptionState.FilterList, subscriptionChan, CLChannel, subscriptionId, subscriptionState.Path, subscriptionList)
 				variant := getFeederNotifyType(subscriptionState.FilterList)
 				if variant == "curvelog" || variant == "range" || variant == "change" {
-					if feederConnected {
-						toFeeder <- createFeederNotifyMessage(variant, subscriptionState.Path, subscriptionId)
-					}
+					toFeeder <- createFeederNotifyMessage(variant, subscriptionState.Path, subscriptionId)
 				}
 				subscriptionId++ // not to be incremented elsewhere
 				dataChan <- responseMap
@@ -1437,9 +1621,7 @@ func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, state
 						status, subscriptionList = deactivateSubscription(subscriptionList, subscriptId)
 						if status != -1 {
 							dataChan <- responseMap
-							if feederConnected {
-								toFeeder <- utils.FinalizeMessage(requestMap)
-							}
+							toFeeder <- utils.FinalizeMessage(requestMap)
 							break
 						}
 						delete(requestMap, "subscriptionId")
@@ -1511,10 +1693,16 @@ func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, state
 			} else {
 				subscriptTicker.Stop()
 			}
+		case <-feederReconnectTicker.C:
+			feederConnectRetry()
 		case feederMessage := <-fromFeederRorC:
 //utils.Info.Printf("Feeder message=%s", feederMessage)
 			triggeredPath, feederNotification = decodeFeederMessage(feederMessage, feederNotification)
 			subscriptionList = checkRCFilterAndIssueMessages(triggeredPath, subscriptionList, backendChan)
+		case feederReq := <- feederRegChan:
+			connectToFeeder(&feederReq)
+			updateFeederRegList(feederReq)
+			feederRegChan <- createFeederNameList()
 		} // select
 	} // for
 utils.Info.Printf("Service manager exit")

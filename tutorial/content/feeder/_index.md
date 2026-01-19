@@ -2,7 +2,7 @@
 title: "VISSR Feeders"
 ---
 
-A feeder is a Sw component that needs to implement the following tasks, depending on which template version they implement:
+A feeder is a Sw component that implements the following tasks, depending on which template version they implement:
 
 The soon to be deprecated template version 1:
 * Use an interface to the data storage for writing and reading data.
@@ -22,6 +22,11 @@ Template version 3:
 * Use an Unix domain socket interface for receiving "client set data" from the server. 
 * Use the UDS interface to receive instructions from the server on which signals to begin/stop issuing events after writing to the data store.
 * Use the UDS interface to issue events when instructed by he server to do so.
+
+Template version 4:
+* Register with the server and receive a UDS socket on which the feeder shall listen for requests and issue events.
+
+Please also see the [feeder README files](https://github.com/COVESA/vissr/tree/master/feeder) for more information about the different feeders.
 
 The SW architecture shown in figure 1 shows a logical partition into the three main tasks of template version 1.
 The architecture shown handle all its communication with the server via the state storage.

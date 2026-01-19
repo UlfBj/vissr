@@ -43,8 +43,9 @@ A tutorial can be found <a href="https://covesa.github.io/vissr/">here</a>.
 * Consent support. The server may connect to an External Consent Framework and together realize consent functionality.
 
 ### Non-spec features
+* Unix domain sockets is supported. Payload formats are identical to Websocket format. Socket file name is /var/tmp/vissv2/udsMgr.sock.
 * HTTP, Websocket, and gRPC can be configured to run with/without TLS.
-* gRCP is supported also by the v2.0 server implementation.
+* gRCP is supported also by the v2.0 server implementation (not in v2.0 spec).
 * SwCs such as feeder and datastore are available to realize a complete tech stack from client to the vehicle "native" domain.
 * Tool for realizing a data mapping between the "VSS domain" and the vehicle "native" domain (e.g. between VSS and CAN data).
 

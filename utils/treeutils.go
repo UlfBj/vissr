@@ -208,6 +208,20 @@ func SetRootNodePointer(rootPath string) *Node_t {
 	return nil
 }
 
+func GetInfoType(treeHandle *Node_t) string {
+	for i:=0; i < len(himForest); i++ {
+		if himForest[i].Handle == treeHandle {
+			infoTypeIndex := strings.LastIndex(himForest[i].Domain, ".")
+			if infoTypeIndex == -1 {
+				return "Missing" //???
+			} else {
+				return himForest[i].Domain[infoTypeIndex+1:]
+			}
+		}
+	}
+	return "Missing" //???
+}
+
 func CreatePathListFile(pListPath string) {
 	j := 1
 	for i:=0; i < len(himForest); i++ {
