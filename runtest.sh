@@ -9,22 +9,28 @@ startme() {
 	cd server/vissv2server
 	go build && mkdir -p logs
 	cd ../../
+
+	echo "Building feederManager..."
+	pushd > /dev/null feeder/feederManager && go build -o feederManager && popd > /dev/null
+	sleep 1s
+
+	echo "Building feeder(s)..."
+	pushd > /dev/null feeder/feederManager && ./feederManager -b -f feederList-runtest.json && popd > /dev/null
+	sleep 1s
+
 	echo "Starting server"
 	screen -S vissv2server -dm bash -c "pushd server/vissv2server && ./vissv2server -m &> ./logs/vissv2server-log.txt && popd"
 
-	echo "Building feederv4..."
-	cd feeder/feeder-template/feederv4
-	go build && mkdir -p logs
-	cd ../../../
 	sleep 1s
-	echo "Starting feederv4"
-	screen -S feederv4 -dm bash -c "pushd feeder/feeder-template/feederv4 && ./feederv4 -i vssjson -t speed-sawtooth.json &> ./logs/feederv4-log.txt && popd"
+	echo "Starting feeder(s)"
+	pushd > /dev/null feeder/feederManager && ./feederManager -s -f feederList-runtest.json && popd > /dev/null
 
 	sleep 2s
 	echo "Building testClient..."
 	cd client/client-1.0/testClient
 	go build
 	cd ../../../
+
 	echo "Starting testClient"
 	screen -S testClient bash -c "pushd client/client-1.0/testClient && go build && ./testClient -m 4 && popd"
 
@@ -32,10 +38,10 @@ startme() {
 }
 
 stopme() {
-	echo "Stopping feederv4"
-	screen -X -S feederv4 quit
+	echo "Terminating feeder(s)"
+	pushd > /dev/null feeder/feederManager && ./feederManager -t -f feederList-runtest.json && popd > /dev/null
 
-	echo "Stopping vissv2server"
+	echo "Terminating vissv2server"
 	screen -X -S vissv2server quit
 
 	sleep 1s

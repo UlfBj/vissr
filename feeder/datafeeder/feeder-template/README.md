@@ -1,7 +1,7 @@
 # Feeder templates
-The feeder template is designed to work together with the VISSv2 server and a state storage as shown in the figure below.
-![Software architecture](feeder-sw-arch.jpg?raw=true)<br>
-*Fig 1. Software architecture overview
+The feeder template is designed to work together with the VISSR server and a state storage as shown in the figure below.
+![Datafeeder Sw design](datafeeder-sw-design.jpg?raw=true)<br>
+*Fig 1. Datafeeder software design
 
 The feeder has two interface clients, each running on a thread, one exercises the interface towards the server, and the other the underlying vehicle interface.
 When either client reads data from he interface it forwards it to the Map & Scale component.

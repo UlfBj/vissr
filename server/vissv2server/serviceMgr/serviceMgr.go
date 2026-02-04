@@ -1001,6 +1001,7 @@ func decodeFeederRegRequest(request []byte, regIndex string) FeederRegElem {  //
 		feederRegElem.InfoType = "error"
 	} else {
 		if reqMap["action"] == "dereg" {
+			feederRegElem.Name = reqMap["name"].(string)
 			feederRegElem.InfoType = "dereg"
 		} else {
 			feederRegElem.Name = reqMap["name"].(string)
@@ -1043,16 +1044,17 @@ func initFeederRegServer(feederRegChan chan FeederRegElem) {
 					feederRegElem = decodeFeederRegRequest(buf[:n], strconv.Itoa(regIndex))
 					regIndex++
 				}
-utils.Info.Printf("initFeederRegServer:feederRegElem.InfoType=%s, feederRegElem.Name=%s", feederRegElem.InfoType, feederRegElem.Name)
+//utils.Info.Printf("initFeederRegServer:feederRegElem.InfoType=%s, feederRegElem.Name=%s", feederRegElem.InfoType, feederRegElem.Name)
 				var response string
 				if feederRegElem.InfoType != "error" && (feederRegElem.InfoType == "dereg" || !feederNameClash(feederNameList, feederRegElem.Name)) {
 					if feederRegElem.InfoType == "dereg" {
-						response = `{"action": "dereg"` + `, "name": ` + feederRegElem.Name + "}"
+						response = `{"action": "dereg"` + `, "name": "` + feederRegElem.Name + `"}`
 					} else {
 						response = `{"action": "reg"` + `, "name": "` + feederRegElem.Name + `", "sockfile": "` + feederRegElem.SockFile + `"}`
 					}
 				} else {
 					response = `{"action": "error"}`
+					feederRegElem.InfoType = "error"
 				}
 				_, err := conn.Write([]byte(response))
 				if err != nil {
@@ -1061,14 +1063,12 @@ utils.Info.Printf("initFeederRegServer:feederRegElem.InfoType=%s, feederRegElem.
 				}
 			}
 		}
-		if feederRegElem.InfoType != "error"{
-			time.Sleep(3 * time.Second)  //wait some time for the feeder to be ready for a connect request
-			feederRegChan <- feederRegElem
-			feederRegElem = <- feederRegChan  //updated list of feeder names on Name element
-			err := json.Unmarshal([]byte(feederRegElem.Name), &feederNameList)
-			if err != nil {
-				utils.Error.Printf("initFeederRegServer:Unmarshal failed, err = %s", err)
-			}
+		time.Sleep(3 * time.Second)  //wait some time for the feeder to be ready for a connect request
+		feederRegChan <- feederRegElem
+		feederRegElem = <- feederRegChan  //updated list of feeder names on Name element
+		err = json.Unmarshal([]byte(feederRegElem.Name), &feederNameList)
+		if err != nil {
+			utils.Error.Printf("initFeederRegServer:Unmarshal failed, err = %s", err)
 		}
 		conn.Close()
 	}
@@ -1089,8 +1089,6 @@ func updateFeederRegList(feederRegElem FeederRegElem) {
 	} else {
 		for i := 0; i < len(feederRegList); i++ {
 			if feederRegList[i].Name == feederRegElem.Name {
-				// stäng UDS, lämna tillbaka channel,...
-				feederRegList[i].Conn.Close()
 				feederRegList[i].Conn = nil
 				freeFeederChannel(feederRegList[i].ChannelIndex)
 				feederRegList = append(feederRegList[:i], feederRegList[i+1:]...)
@@ -1104,7 +1102,11 @@ func createFeederNameList() FeederRegElem {
 	for i := 0; i < len(feederRegList); i++ {
 		feederNameList += `"` + feederRegList[i].Name + `", `
 	}
-	feederNameList = feederNameList[:len(feederNameList)-2] +  "]"
+	if len(feederRegList) == 0 {
+		feederNameList += "]"
+	} else {
+		feederNameList = feederNameList[:len(feederNameList)-2] + "]"
+	}
 	var feederRegElem FeederRegElem
 	feederRegElem.Name = feederNameList
 	return feederRegElem
@@ -1699,8 +1701,12 @@ func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, state
 			triggeredPath, feederNotification = decodeFeederMessage(feederMessage, feederNotification)
 			subscriptionList = checkRCFilterAndIssueMessages(triggeredPath, subscriptionList, backendChan)
 		case feederReq := <- feederRegChan:
-			connectToFeeder(&feederReq)
-			updateFeederRegList(feederReq)
+			if feederReq.InfoType != "error" && feederReq.InfoType != "dereg" {
+				connectToFeeder(&feederReq)
+			}
+			if feederReq.InfoType != "error" {
+				updateFeederRegList(feederReq)
+			}
 			feederRegChan <- createFeederNameList()
 		} // select
 	} // for

@@ -1,0 +1,1 @@
+[{"name":"dataFeeder1","searchpath":"../datafeeder/feeder-template/feederv4/feederv4","cliparams":"-i vssjson -t speed-sawtooth.json","pid":"0","feedertype":"static","feederstatus":"active"}]
