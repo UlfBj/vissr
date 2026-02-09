@@ -51,12 +51,12 @@ func readFeederList(feederListFile string) []FeederElem {
 func saveFeederList() {
 	jsonFeederList, err := json.Marshal(feederList)
 	if err != nil {
-		fmt.Printf("saveFeederList: Feder list syntax error: %s\n", err)
+		fmt.Printf("saveFeederList: Feeder list syntax error: %s\n", err)
 		return
 	}
 	err = os.WriteFile(feederListFile, jsonFeederList, 0644)
 	if err != nil {
-		fmt.Printf("saveFeederList: Feder list syntax error: %s\n", err)
+		fmt.Printf("saveFeederList: write error: %s\n", err)
 		return
 	}
 }

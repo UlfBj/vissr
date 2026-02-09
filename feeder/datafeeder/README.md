@@ -28,3 +28,33 @@ Datafeeders are built and run as separate executables with the commands below is
 $ go build<br>
 $ ./name-of-executable
 
+## Trigger channel protocol between server and data feeder
+The main reason for the trigger channel is to eliminate the latency that the polling of the statestorage otherwise would lead to.
+This was first adressed in the template version 2 where data to be written to the underlying vehicle system was directly sent to the feeder over the trigger channel.
+In template version three this was extended so that the feeder can be instructed by the server that for certain signals it wants to get a trigger when the feeder has written the signal to the statestorage.
+The protocol to realize this is shown below.
+The server issues the following request to the feeder for data that shall be written to a vehicle signal.
+```
+{”action”: ”set”, "data": {"path":"x", "dp":{"value":"y", "ts":"z"}}}
+```
+The server may decide for certain signals that it has received a client subscribe request on to request the feeder to
+send it a trigger event after writing data for that signal in the statestorage.
+This request shall have the following format:
+```
+{”action”: ”subscribe”, ”path”: [”p1”, ..., ”pN”]}
+```
+and the events that the feeder then may issue to the server has the following format:
+```
+{”action”: ”subscription”, ”path”: ”p”}
+```
+When the server receives a client unsubscribe request,
+if it has issued a previous subscribe request to the feeder the it shall issue an unsubscribe request to the feeder to stop further trigger messages.
+The unsubsribe request shall have the followign format:
+```
+{”action”: ”unsubscribe”, ”path”: [”p1”, ..., ”pN”]} // message from fcommmgr to feeder
+```
+All request messages, but not the event messages shall get a response message with the following format:
+```
+{”action”: ”subscribe”, ”status”: “ok/nok”}
+```
+Status shall be "ok" for successful processing of the request and "nok" for unsuccessful processing.

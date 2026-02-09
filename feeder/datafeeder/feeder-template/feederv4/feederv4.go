@@ -683,7 +683,7 @@ func linearConversion(coeffArray []interface{}, north2SouthConv bool, inValue st
 
 func main() {
 	// Create new parser object
-	parser := argparse.NewParser("print", "Data feeder template version 3")
+	parser := argparse.NewParser("print", "Data feeder template version 4")
 	configFile := parser.String("c", "configfile", &argparse.Options{
 		Required: false,
 		Help:     "Feeder configuration filename",

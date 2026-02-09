@@ -12,7 +12,7 @@ A feeder registers by issuing the following request:
 ```
 Reg-request:{"action": "reg", "name": "xxxx"}
 ```
-If successful the server rsponds with
+If successful the server responds with
 ```
 Reg-response:{"action": "reg"", "name": "xxxx", "sockfile": "/x/y/z.sock"}
 ```
