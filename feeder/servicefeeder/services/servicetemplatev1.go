@@ -20,6 +20,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"sort"
 	"strconv"
 	"strings"
@@ -182,40 +184,47 @@ func deSerializeUInt(buf []byte) interface{} {
 	}
 }
 
-func feederRegister(regSockFile string, configData ConfigData) string {
-	conn, err := net.Dial("unix", regSockFile)
+func feederRegistration(action string, configData ConfigData) string {
+	conn, err := net.Dial("unix", "/var/tmp/vissv2/feederReg.sock")
 	if err != nil {
-		utils.Error.Printf("feederRegister:Failed to UDS connect to the server. Err=%s", err)
+		utils.Error.Printf("feederRegistration:Failed to UDS connect to the server. Err=%s", err)
 		return ""
 	}
-	request := `{"action": "reg", "name": "` + configData.Name + `", "infotype": "` + configData.InfoType + `"}`
+	request := `{"action": "` + action + `", "name": "` + configData.Name + `", "infotype": "` + configData.InfoType + `"}`
 	_, err = conn.Write([]byte(request))
 	if err != nil {
-		utils.Error.Printf("feederRegister:Write failed, err = %s", err)
+		utils.Error.Printf("feederRegistration:Write failed, err = %s", err)
 	}
 	buf := make([]byte, 512)
 	n, err := conn.Read(buf)
 	if err != nil {
-		utils.Error.Printf("feederRegister:Read failed, err = %s", err)
+		utils.Error.Printf("feederRegistration:Read failed, err = %s", err)
 		return ""
 	}
-	utils.Info.Printf("feederRegister:Reg response from server: %s", string(buf[:n]))
+	utils.Info.Printf("feederRegistration:Reg response from server: %s", string(buf[:n]))
 	var responseMap map[string]interface{}
 	err = json.Unmarshal(buf[:n], &responseMap)
 	if err != nil {
-		utils.Error.Printf("feederRegister:Unmarshal error=%s", err)
+		utils.Error.Printf("feederRegistration:Unmarshal error=%s", err)
 		return ""
 	}
 	conn.Close()
 	if responseMap["action"].(string) == "error" {
-		utils.Error.Printf("feederRegister:Server responded with error")
+		utils.Error.Printf("feederRegistration:Server responded with error")
+		return ""
+	}
+	if action == "dereg" {
 		return ""
 	}
 	return responseMap["sockfile"].(string)
 }
 
 func initVSSInterfaceMgr(inputChan chan DomainData, outputChan chan DomainData, configData ConfigData) {
- 	sockFile := feederRegister("/var/tmp/vissv2/feederReg.sock", configData)
+ 	sockFile := feederRegistration("reg", configData)
+ 	if len(sockFile) == 0 {
+		utils.Error.Printf("initVSSInterfaceMgr:Registration failed, the feeder terminates")
+		os.Exit(-1)
+ 	}
 	os.Remove(sockFile)
 	listener, err := net.Listen("unix", sockFile)
 	if err != nil {
@@ -670,7 +679,7 @@ func linearConversion(coeffArray []interface{}, north2SouthConv bool, inValue st
 
 func main() {
 	// Create new parser object
-	parser := argparse.NewParser("print", "Data feeder template version 3")
+	parser := argparse.NewParser("print", "Service template version 1")
 	configFile := parser.String("c", "configfile", &argparse.Options{
 		Required: false,
 		Help:     "Feeder configuration filename",
@@ -757,6 +766,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGUSR1)
+
 	vssInputChan := make(chan DomainData, 3)
 	vssOutputChan := make(chan DomainData, 3)
 	vehicleInputChan := make(chan DomainData, 3)
@@ -785,6 +797,14 @@ func main() {
 				vssOutputChan <- convertDomainData(false, vehicleInData, feederMap)
 			} else {
 				vssOutputChan <- vehicleInData // conversion not needed
+			}
+		case sig := <- sigChan:
+			if sig == syscall.SIGUSR1 {
+				feederRegistration("dereg", feederConfig)
+				time.Sleep(1 * time.Second)
+				os.Exit(1)
+			} else {
+				utils.Info.Printf("Received unknown signal=%d",sig)
 			}
 		}
 	}

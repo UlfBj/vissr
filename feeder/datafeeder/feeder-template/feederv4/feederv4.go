@@ -245,10 +245,6 @@ func initVSSInterfaceMgr(inputChan chan DomainData, outputChan chan DomainData, 
 			if len(outData.Name) == 0 {
 				continue
 			}
-/*			if outData.Name == "dereg" {
-				udsChan <- outData.Value
-				return
-			}*/
 			status := statestorageSet(outData.Name, outData.Value, utils.GetRfcTime())
 			if status != 0 {
 				utils.Error.Printf("initVSSInterfaceMgr():State storage write failed")
@@ -805,10 +801,6 @@ func main() {
 		case sig := <- sigChan:
 			if sig == syscall.SIGUSR1 {
 				feederRegistration("dereg", feederConfig)
-/*				var outData DomainData
-				outData.Name = "dereg"
-				outData.Value = `{"action": "dereg", "name": "` + feederConfig.Name + `", "infotype": "data"}`
-				vssOutputChan <- outData*/
 				time.Sleep(1 * time.Second)
 				os.Exit(1)
 			} else {

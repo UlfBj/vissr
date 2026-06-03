@@ -267,6 +267,7 @@ func sortPathList(listFname string) {
 	}
 	sort.Strings(pathList.LeafPaths)
 	file, _ := json.Marshal(pathList)
+	file = []byte(strings.ReplaceAll(string(file), `","`, "\",\n\""))
 	_ = os.WriteFile(listFname, file, 0644)
 }
 

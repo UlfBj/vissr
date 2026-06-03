@@ -1166,7 +1166,7 @@ func feederFrontend(toFeeder chan string, fromFeederRorC chan string, fromFeeder
 		feederChannelList[i].Channel = make(chan string)
 	}
 	go feederReaderMgr(fromFeeders)
-	feederNotification := "not-verified"  // possible alues ["not-verified", "not-supported", "supported"]
+	feederNotification := "not-verified"  // possible values ["not-verified", "not-supported", "supported"]
 	subMessageCount := 0
 	for {
 		select {

@@ -8,9 +8,9 @@ The feeder reads by default the file "feederConfig.json" at startup and uses the
 It is possible to configure a different file to be read by the CLI parameter "-c <filename>".
 This can be used when starting multiple feeders.
 
-A feeder registers by issuing the following request:
+A datafeeder registers by issuing the following request:
 ```
-Reg-request:{"action": "reg", "name": "xxxx"}
+Reg-request:{"action": "reg", "name": "xxxx", "infotype": "Data"}
 ```
 If successful the server responds with
 ```
@@ -32,7 +32,7 @@ Non-successful requests gets the following error response from the server:
 Error-response:{"action": "error"}
 ```
 The server does not hold information on which Set request shall be sent to which feeder that is responsible for forwarding it to the underlying vehicle system.
-It therefore sends the request to all registered feeders, and then it is the responsibility of the feeders to evaluate which Set requests it shall act on, or just drop.
+It therefore sends the request to all registered datafeeders, and then it is the responsibility of the feeders to evaluate which Set requests it shall act on, or just drop.
 
 The current logic used by the feederv4 supports any tree/branch to be defined as the feeder scope,
 but it does not support the exclusion of parts of the tree/branch.

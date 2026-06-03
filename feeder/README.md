@@ -15,7 +15,7 @@ The tech stack Sw architecture involving a datafeeder is shown below.
 ![Data feeder Sw architecure](Datafeeder-arch.jpg)\
 * Fig. 1 Data feeder Sw architecure
 
-A servicefeeder is partitioned into multiple SwCs - one servicefeederhub and one or more service end points.
+A servicefeeder framework is partitioned into multiple SwCs - one servicefeederhub and one or more service end points.
 
 The servicefeederhub has the following main tasks:
 * Realizing the interface towards the state storage and the server.

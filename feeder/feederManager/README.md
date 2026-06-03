@@ -7,7 +7,7 @@ The feeder manager can be started up to only read the file containing the list o
 before it terminates.\
 It can also be started up to display a UI which enables the addition or removal of feeders of the dynamic type.
 Feeders of the static type cannot be modified by the UI.
-A feeder is on the list represnted by the following data:
+A feeder is on the list represented by the following data:
 * Name: A short but preferrably descriptive name.
 * Searchpath to the feeder binary file.
 * CLI parameters: ny CLI parameters that the feeder shall be provided with at its startup.
