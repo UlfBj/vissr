@@ -20,29 +20,29 @@ Not shown in the figure is the service end point registration interface that is 
 This interface has a similar pattern to the registration interface where feeders register/de-register with the server, see below.
 A service end point registers by issuing the following request to the servicefeeder:
 ```
-Reg-request:{"action": "reg", "servicename": "a.b.c"}
+Reg-request:{"action": "reg", "servicepath": "["path1", .., "pathN"]"}
 ```
-where a.b.c is the path in the service tree. This path can point to a separate service node or to a service group branch node.
-In the latter case the service end point then is responsible for the execution of all the services of the service group.\
+where servicepath is an array of the paths in the service tree that the service manages.
+The service end point is responsible for the execution of all the services provided in the array.\
 If successful the server responds with
 ```
-Reg-response:{"action": "reg"", "servicename": "a.b.c", "sockfile": "/x/y/z.sock"}
+Reg-response:{"action": "reg"", "servicepath": "["path1", .., "pathN"]", "sockfile": "/x/y/z.sock"}
 ```
 where the sockfile shall be used by the service end point to set up a UDS server listening to requests from the servicefeeder.
 
 A service end point can also at any point de-register with the servicefeeder by issuing the request:
 ```
-Dereg-request:{"action": "dereg", "servicename": "a.b.c"}
+Dereg-request:{"action": "dereg", "servicepath": "["path1", .., "pathN"]"}
 ```
 which if successful get the following response:
 ```
-Dereg-response:{"action": "dereg", "servicename": "a.b.c"}
+Dereg-response:{"action": "dereg", "servicepath": "["path1", .., "pathN"]"}
 ```
 Non-successful requests gets the following error response from the server:
 ```
 Error-response:{"action": "error"}
 ```
-The communication over the UDS channel between the service feeder and a service end point has the following structure.
+The service must not de-register all the services it previously registered.
 
 The server does not hold information on which Invoke or Cancel requests that shall be sent to which service feeder that is responsible for forwarding it to the underlying vehicle system.
 It therefore sends the request to all registered service feeders, and then it is the responsibility of the feeders to evaluate which requests it shall act on, or just drop.

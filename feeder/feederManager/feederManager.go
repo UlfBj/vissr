@@ -308,7 +308,7 @@ func buildFeeders() {
 			fmt.Printf("Building %s...\n", feederList[i].SearchPath)
 			err := buildFeeder(feederList[i].SearchPath)
 			if err != nil {
-				fmt.Printf("Build of %s failed with error=s\n", feederList[i].SearchPath, err)
+				fmt.Printf("Build of %s failed with error=%s\n", feederList[i].SearchPath, err)
 			} else {
 				fmt.Printf("%s built successfully\n", feederList[i].SearchPath)
 			}

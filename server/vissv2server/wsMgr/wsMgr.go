@@ -97,16 +97,19 @@ func getDcConfig(reqMessage string) (string, string, bool, bool) {
 }
 
 func getValueForKey(reqMessage string, key string) string {
-	var keyValue string
-	keyIndex := strings.Index(reqMessage, key) + len(key)
+	rawIndex := strings.Index(reqMessage, key)
+	if rawIndex == -1 {
+		return ""
+	}
+	keyIndex := rawIndex + len(key)
 	hyphenIndex1 := strings.Index(reqMessage[keyIndex:], `"`)
 	if hyphenIndex1 != -1 {
 		hyphenIndex2 := strings.Index(reqMessage[keyIndex+hyphenIndex1+1:], `"`)
 		if hyphenIndex2 != -1 {
-			keyValue = reqMessage[keyIndex+hyphenIndex1+1:keyIndex+hyphenIndex1+1+hyphenIndex2]
+			return reqMessage[keyIndex+hyphenIndex1+1 : keyIndex+hyphenIndex1+1+hyphenIndex2]
 		}
 	}
-	return keyValue
+	return ""
 }
 
 func initDcCache() {
@@ -119,10 +122,9 @@ func initDcCache() {
 func dcCacheInsert(payloadId string, dcValue string, responseHandling int) {
 	for i := 0; i < DCCACHESIZE; i++ {
 		if dataCompressionCache[i].ResponseHandling == -1 {
-			if setDcValue(dcValue, i) {
-				dataCompressionCache[i].ResponseHandling = responseHandling
-				dataCompressionCache[i].PayloadId = payloadId
-			}
+			setDcValue(dcValue, i)
+			dataCompressionCache[i].ResponseHandling = responseHandling
+			dataCompressionCache[i].PayloadId = payloadId
 			return
 		}
 	}
@@ -164,6 +166,7 @@ func getDcCacheIndex(payloadId string) int {
 
 func resetDcCache(cacheIndex int) {
 	dataCompressionCache[cacheIndex].ResponseHandling = -1
+	dataCompressionCache[cacheIndex].PayloadId = ""
 	dataCompressionCache[cacheIndex].SortedList = nil
 }
 
@@ -233,24 +236,32 @@ func getSortedPaths(respMessage string) []string {
 	var paths []string
 	dataIf := respMap["data"]
 	switch data := dataIf.(type) {
-		case []interface{}:
-//			utils.Info.Println(data, "is []interface{}")
-			for i := 0; i < len(data); i++ {
-				for k, v := range data[i].(map[string]interface{}) {
-					if k == "path" {
-						paths = append(paths, v.(string))
+	case []interface{}:
+		for i := 0; i < len(data); i++ {
+			m, ok := data[i].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for k, v := range m {
+				if k == "path" {
+					if pathStr, ok := v.(string); ok {
+						paths = append(paths, pathStr)
 					}
 				}
 			}
-		case interface{}:
-//			utils.Info.Println(data, "is interface{}")
-			for k, v := range data.(map[string]interface{}) {
-				if k == "path" {
-					paths = append(paths, v.(string))
+		}
+	case map[string]interface{}:
+		for k, v := range data {
+			if k == "path" {
+				if pathStr, ok := v.(string); ok {
+					paths = append(paths, pathStr)
 				}
 			}
-		default:
-			utils.Info.Println(data, "is of an unknown type")
+		}
+	default:
+		if data != nil {
+			utils.Info.Printf("getSortedPaths(): data field is of unknown type %T", data)
+		}
 	}
 	sort.Strings(paths)
 	return paths
@@ -264,27 +275,35 @@ utils.Info.Printf("compressTs()")
 		return respMessage
 	}
 	var tsList []string
-	messageTs := respMap["ts"].(string)
+	messageTs, ok := respMap["ts"].(string)
+	if !ok {
+		utils.Error.Printf("compressTs(): missing/non-string ts field in=%s", respMessage)
+		return respMessage
+	}
 	dataIf := respMap["data"]
 	switch data := dataIf.(type) {
-		case []interface{}:
-//			utils.Info.Println(data, "is []interface{}")
-			for i := 0; i < len(data); i++ {
-				for k, v := range data[i].(map[string]interface{}) {
-					if k == "dp" {
-						tsList = append(tsList, getDpTsList(v)...)
-					}
-				}
+	case []interface{}:
+		for i := 0; i < len(data); i++ {
+			m, ok := data[i].(map[string]interface{})
+			if !ok {
+				continue
 			}
-		case interface{}:
-//			utils.Info.Println(data, "is interface{}")
-			for k, v := range data.(map[string]interface{}) {
+			for k, v := range m {
 				if k == "dp" {
-						tsList = getDpTsList(v)
+					tsList = append(tsList, getDpTsList(v)...)
 				}
 			}
-		default:
-			utils.Info.Println(data, "is of an unknown type")
+		}
+	case map[string]interface{}:
+		for k, v := range data {
+			if k == "dp" {
+				tsList = getDpTsList(v)
+			}
+		}
+	default:
+		if data != nil {
+			utils.Info.Printf("compressTs(): data field is of unknown type %T", data)
+		}
 	}
 	respMessage = replaceTs(respMessage, messageTs, tsList)
 	return respMessage
@@ -293,24 +312,32 @@ utils.Info.Printf("compressTs()")
 func getDpTsList(dpMap interface{}) []string {
 	var tsList []string
 	switch dp := dpMap.(type) {
-		case []interface{}:
-//			utils.Info.Println(dp, "is []interface{}")
-			for i := 0; i < len(dp); i++ {
-				for k, v := range dp[i].(map[string]interface{}) {
-					if k == "ts" {
-						tsList = append(tsList, v.(string))
+	case []interface{}:
+		for i := 0; i < len(dp); i++ {
+			m, ok := dp[i].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for k, v := range m {
+				if k == "ts" {
+					if ts, ok := v.(string); ok {
+						tsList = append(tsList, ts)
 					}
 				}
 			}
-		case interface{}:
-//			utils.Info.Println(dp, "is interface{}")
-			for k, v := range dp.(map[string]interface{}) {
-				if k == "ts" {
-						tsList = append(tsList, v.(string))
+		}
+	case map[string]interface{}:
+		for k, v := range dp {
+			if k == "ts" {
+				if ts, ok := v.(string); ok {
+					tsList = append(tsList, ts)
 				}
 			}
-		default:
-			utils.Info.Println(dp, "is of an unknown type")
+		}
+	default:
+		if dp != nil {
+			utils.Info.Printf("getDpTsList(): dpMap is of unknown type %T", dp)
+		}
 	}
 	return tsList
 }
@@ -365,6 +392,38 @@ func compressPaths(respMessage string, sortedList []string) string {
 	return respMessage
 }
 
+// handleWsTransportResponse processes a single response from the server
+// core: applies compression-response post-processing and forwards to
+// the connected WS client via RemoveRoutingForwardResponse. Extracted
+// from WsMgrInit's for/select loop so the response path can be unit-
+// tested independently of the goroutine machinery — see
+// wsMgr_dispatch_test.go.
+func handleWsTransportResponse(respMessage string, transportMgrChan chan string) {
+	utils.Info.Printf("WS mgr hub: Response from server core:%s", respMessage)
+	respMessage = checkCompressionResponse(respMessage)
+	RemoveRoutingForwardResponse(respMessage, transportMgrChan)
+}
+
+// handleWsClientRequest processes a single inbound WS-client request.
+// Extracted from WsMgrInit so the validation / compression /
+// forwarding behaviour can be unit-tested. Matches the shape of
+// handleUdsClientRequest in udsMgr (see PR #124).
+func handleWsClientRequest(reqMessage string, mgrId int, clientId int, transportMgrChan chan string) {
+	if !strings.Contains(reqMessage, `"internal-killsubscriptions"`) {
+		validationError := utils.JsonSchemaValidate(reqMessage)
+		if len(validationError) > 0 {
+			requestMap := make(map[string]interface{})
+			requestMap["action"] = utils.ExtractFromRequest(reqMessage, "action")
+			requestMap["requestId"] = utils.ExtractFromRequest(reqMessage, "requestId")
+			utils.SetErrorResponse(requestMap, errorResponseMap, 0, validationError) //bad_request
+			wsClientChan[clientId] <- utils.FinalizeMessage(errorResponseMap)
+			return
+		}
+		checkCompressionRequest(reqMessage)
+	}
+	utils.AddRoutingForwardRequest(reqMessage, mgrId, clientId, transportMgrChan)
+}
+
 func WsMgrInit(mgrId int, transportMgrChan chan string) {
 	var reqMessage string
 	var clientId int
@@ -378,9 +437,7 @@ func WsMgrInit(mgrId int, transportMgrChan chan string) {
 	for {
 		select {
 		case respMessage := <-transportMgrChan:
-			utils.Info.Printf("WS mgr hub: Response from server core:%s", respMessage)
-			respMessage = checkCompressionResponse(respMessage)
-			RemoveRoutingForwardResponse(respMessage, transportMgrChan)
+			handleWsTransportResponse(respMessage, transportMgrChan)
 			continue
 		case reqMessage = <-wsClientChan[0]: clientId = 0
 		case reqMessage = <-wsClientChan[1]: clientId = 1
@@ -403,18 +460,6 @@ func WsMgrInit(mgrId int, transportMgrChan chan string) {
 		case reqMessage = <-wsClientChan[18]: clientId = 18
 		case reqMessage = <-wsClientChan[19]: clientId = 19
 		}
-		if !strings.Contains(reqMessage, `"internal-killsubscriptions"`) {
-			validationError := utils.JsonSchemaValidate(reqMessage)
-			if len(validationError) > 0 {
-				requestMap := make(map[string]interface{})
-				requestMap["action"] = utils.ExtractFromRequest(reqMessage, "action")
-				requestMap["requestId"] = utils.ExtractFromRequest(reqMessage, "requestId")
-				utils.SetErrorResponse(requestMap, errorResponseMap, 0, validationError) //bad_request
-				wsClientChan[clientId] <- utils.FinalizeMessage(errorResponseMap)
-				continue
-			}
-			checkCompressionRequest(reqMessage)
-		}
-		utils.AddRoutingForwardRequest(reqMessage, mgrId, clientId, transportMgrChan)
+		handleWsClientRequest(reqMessage, mgrId, clientId, transportMgrChan)
 	}
 }

@@ -23,10 +23,29 @@ import (
 	"github.com/gorilla/websocket"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// safeServerFilename rejects filenames from the server that contain
+// path separators, parent-directory references, or absolute-path
+// prefixes. A compromised (or MITM'd) server would otherwise control
+// the os.Create path on the client side, allowing arbitrary file
+// write outside the client's working directory.
+func safeServerFilename(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("empty filename from server")
+	}
+	if strings.Contains(name, "..") {
+		return "", fmt.Errorf("server filename %q contains parent-directory reference", name)
+	}
+	if filepath.Base(name) != name {
+		return "", fmt.Errorf("server filename %q contains path separators", name)
+	}
+	return name, nil
+}
 
 var serverUrl string
 
@@ -268,12 +287,22 @@ func uploadFile(ctrlChannel chan string, dataChannel chan []byte) {
 			utils.Error.Printf("Server responded with error message=%s", ctrlResp)
 			return
 		} else {
-			ulFile, hash, uidString = getFileDescriptorData(responseMap["value"].(interface{}))
+			ulFile, hash, uidString = getFileDescriptorData(responseMap["value"])
 		}
 	} else {
 		utils.Error.Printf("Response=%s is corrupt", ctrlResp)
 		return
 	}
+	// The 'name' the server hands us ends up in os.Create directly.
+	// A compromised or MITM'd server can therefore write outside the
+	// client's working directory by returning name="../../etc/...".
+	// Reject any name that isn't a plain filename.
+	safeName, err := safeServerFilename(ulFile)
+	if err != nil {
+		utils.Error.Printf("uploadFile: rejecting server-supplied filename: %s", err)
+		return
+	}
+	ulFile = safeName
 	uid, _ := hex.DecodeString(uidString)
 	file, err := os.Create(ulFile)  // overwriting any existing file...
 	if err != nil {
@@ -308,12 +337,7 @@ func uploadFile(ctrlChannel chan string, dataChannel chan []byte) {
 }
 
 func equalByteArray(array1 []byte, array2 []byte) bool {
-	for i := 0; i < len(array1); i++ {
-		if array1[i] != array2[i] {
-			return false
-		}
-	}
-	return true
+	return bytes.Equal(array1, array2)
 }
 
 func getFileDescriptorData(value interface{}) (string, string, string) { // {"name": "xxx","hash": "yyy","uid": "zzz"}

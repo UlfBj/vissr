@@ -31,3 +31,16 @@ The architecture inherits the general structure from previous generation,
 the new parts are found in the "feeder framework" south of the state storage.
 
 ![VISSRv3.2 tech stack](/vissr/images/VISSRv3.2-tech-stack.jpg?width=40pc)
+
+Also found on this repo are implementations of other components that are needed to realize a communication tech stack that reaches from clients through the server and to the underlying vehicle system interface.
+
+These software components (SwCs) can be categorized as follows:
+* server
+* clients
+* data storage
+* feeders
+* tools
+
+The tutorial describes each SwC category in a separate chapter.
+It also contains a few Proof of concept (POC) examples, and information about installing,
+building and running Golang based SwCs, a Docker containerization, and about some peripheral components.

@@ -15,21 +15,18 @@ package main
 import (
 	"fmt"
 	"os"
-//	"bufio"
+	"sync"
 
 	"github.com/akamensky/argparse"
-//	"github.com/gorilla/mux"
 
+	"crypto/rand"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"gopkg.in/yaml.v3"
-	"crypto/sha1"
 	"io"
-//	"net/http"
-//	"sort"
 	"strconv"
 	"strings"
-//	"time"
 
 	"github.com/covesa/vissr/server/vissv2server/atServer"
 	"github.com/covesa/vissr/server/vissv2server/grpcMgr"
@@ -42,6 +39,13 @@ import (
 
 	"github.com/covesa/vissr/utils"
 )
+
+// atsChannelMu serializes the request/response RPC over atsChannel[0].
+// Without it, two concurrent serveRequest goroutines (one per transport)
+// can interleave their request and response on the shared channel and
+// one will receive the other's reply. Same shape applies to ftChannel.
+var atsChannelMu sync.Mutex
+var ftChannelMu sync.Mutex
 
 // set to MAXFOUNDNODES in cparserlib.h
 const MAXFOUNDNODES = 1500
@@ -80,9 +84,19 @@ var ftChannel chan utils.FileTransferCache
 
 var errorResponseMap = map[string]interface{}{}
 
-func extractMgrId(routerId string) int { // "RouterId" : "mgrId?clientId"
+// extractMgrId parses a RouterId of the form "mgrId?clientId" and returns
+// the mgrId, or -1 if the string is malformed (missing '?' or non-numeric
+// mgrId). The previous version did `routerId[:delim]` with delim == -1 on a
+// missing delimiter and silently routed parse failures to channel 0.
+func extractMgrId(routerId string) int {
 	delim := strings.Index(routerId, "?")
-	mgrId, _ := strconv.Atoi(routerId[:delim])
+	if delim <= 0 {
+		return -1
+	}
+	mgrId, err := strconv.Atoi(routerId[:delim])
+	if err != nil {
+		return -1
+	}
 	return mgrId
 }
 
@@ -91,12 +105,18 @@ func serviceDataSession(serviceMgrChannel chan map[string]interface{}, serviceDa
 		select {
 
 		case response := <-serviceMgrChannel:
-//			utils.Info.Printf("Server core: Response from service mgr:%s", response)
-			mgrIndex := extractMgrId(response["RouterId"].(string))
-//			utils.Info.Printf("mgrIndex=%d", mgrIndex)
+			routerId, ok := response["RouterId"].(string)
+			if !ok {
+				utils.Error.Printf("serviceDataSession: missing/invalid RouterId in response; dropping")
+				continue
+			}
+			mgrIndex := extractMgrId(routerId)
+			if mgrIndex < 0 || mgrIndex >= len(backendChannel) {
+				utils.Error.Printf("serviceDataSession: invalid mgrIndex=%d from RouterId=%q; dropping", mgrIndex, routerId)
+				continue
+			}
 			backendChannel[mgrIndex] <- response
 		case request := <-serviceDataChannel:
-//			utils.Info.Printf("Server core: Request to service:%s", request)
 			serviceMgrChannel <- request
 		}
 	}
@@ -107,15 +127,21 @@ func transportDataSession(transportMgrChannel chan string, transportDataChannel 
 		select {
 
 		case msg := <-transportMgrChannel:
-//			utils.Info.Printf("request: %s", msg)
 			var msgMap map[string]interface{}
 			utils.MapRequest(msg, &msgMap)
-			transportDataChannel <- msgMap // send request to server hub
+			// Bug fix: previously unconditional send could wedge the per-transport
+			// goroutine if the central dispatcher was slow. Non-blocking with
+			// drop-and-log on overflow.
+			select {
+			case transportDataChannel <- msgMap:
+			default:
+				utils.Error.Printf("transportDataSession: transportDataChannel full, dropping request")
+			}
 		case message := <-backendChannel:
 			select {
-				case transportMgrChannel <- utils.FinalizeMessage(message):
-				default: 
-					utils.Error.Printf("server hub: Event dropped")
+			case transportMgrChannel <- utils.FinalizeMessage(message):
+			default:
+				utils.Error.Printf("server hub: Event dropped")
 			}
 		}
 	}
@@ -163,6 +189,8 @@ func getTokenErrorMessage(index int) string {
 		return "Invalid AUD. "
 	case 21:
 		return "Invalid Context. "
+	case 22:
+		return "Invalid ISS. "
 	case 30:
 		return "Invalid Token: token revoked. "
 	case 40, 41, 42:
@@ -179,35 +207,40 @@ func setTokenErrorResponse(reqMap map[string]interface{}, errorCode int) {
 	utils.SetErrorResponse(reqMap, errorResponseMap, 3, getTokenErrorMessage(errorCode))
 }
 
-// Sends a message to the Access Token Server to validate the Access Token paths and permissions
+// Sends a message to the Access Token Server to validate the Access Token paths and permissions.
+// Uses atsChannelMu to serialize the request/response over the shared atsChannel[0]; without
+// it, two concurrent serveRequest goroutines would race and one might receive the other's reply.
 func verifyToken(token string, action string, paths string, validation int) (int, string, string) {
 	handle := ""
 	gatingId := ""
 	request := `{"token":"` + token + `","paths":` + paths + `,"action":"` + action + `","validation":"` + strconv.Itoa(validation) + `"}`
+
+	atsChannelMu.Lock()
 	atsChannel[0] <- request
 	body := <-atsChannel[0]
+	atsChannelMu.Unlock()
+
 	var bdy map[string]interface{}
-	var err error
-	if err = json.Unmarshal([]byte(body), &bdy); err != nil {
+	if err := json.Unmarshal([]byte(body), &bdy); err != nil {
 		utils.Error.Print("verifyToken: Error unmarshalling ats response. ", err)
 		return 41, handle, gatingId
 	}
-	if bdy["validation"] == nil {
-		utils.Error.Print("verifyToken: Error reading validation claim. ")
+	validationStr, ok := bdy["validation"].(string)
+	if !ok {
+		utils.Error.Print("verifyToken: missing/invalid validation claim in ats response")
 		return 42, handle, gatingId
 	}
-
-	// Converts the validation claim to int
-	var atsValidation int
-	if atsValidation, err = strconv.Atoi(bdy["validation"].(string)); err != nil {
+	atsValidation, err := strconv.Atoi(validationStr)
+	if err != nil {
 		utils.Error.Print("verifyToken: Error converting validation claim to int. ", err)
 		return 42, handle, gatingId
-	} else if atsValidation == 0 {
-		if bdy["handle"] != nil {
-			handle = bdy["handle"].(string)
+	}
+	if atsValidation == 0 {
+		if h, ok := bdy["handle"].(string); ok {
+			handle = h
 		}
-		if bdy["gatingId"] != nil {
-			gatingId = bdy["gatingId"].(string)
+		if g, ok := bdy["gatingId"].(string); ok {
+			gatingId = g
 		}
 	}
 	return atsValidation, handle, gatingId
@@ -252,7 +285,12 @@ func jsonifyTreeNode(nodeHandle *utils.Node_t, jsonBuffer string, depth int, max
 			newJsonBuffer += "}"
 		}
 	}
-	if newJsonBuffer[len(newJsonBuffer)-1] == ',' && newJsonBuffer[len(newJsonBuffer)-2] != '}' {
+	// Bug fix: previous code indexed [len-1] and [len-2] without bounds
+	// check. Worst-case the accumulator is at least 6 chars (`":{`,`"type":"` etc.)
+	// but be defensive.
+	if len(newJsonBuffer) >= 2 &&
+		newJsonBuffer[len(newJsonBuffer)-1] == ',' &&
+		newJsonBuffer[len(newJsonBuffer)-2] != '}' {
 		newJsonBuffer = newJsonBuffer[:len(newJsonBuffer)-1]
 	}
 	newJsonBuffer += "},"
@@ -275,12 +313,15 @@ func countPathSegments(path string) int {
 func getNoScopeList(tokenContext string) ([]string, int) {
 	// call ATS to get noscope list
 	request := `{"context":"` + tokenContext + `"}`
+	atsChannelMu.Lock()
 	atsChannel[0] <- request
 	body := <-atsChannel[0]
+	atsChannelMu.Unlock()
+
 	var noScopeMap map[string]interface{}
 	err := json.Unmarshal([]byte(body), &noScopeMap)
 	if err != nil {
-		utils.Error.Printf("initPurposelist:error body=%s, err=%s", body, err)
+		utils.Error.Printf("getNoScopeList: error body=%s, err=%v", body, err)
 		return nil, 0
 	}
 	return extractNoScopeElementsLevel1(noScopeMap)
@@ -352,17 +393,94 @@ func getSubTreeNodeHandle(path string, searchData []utils.SearchData_t, matches 
 }
 
 func getTokenContext(reqMap map[string]interface{}) string {
-	if reqMap["authorization"] != nil {
-		return utils.ExtractFromToken(reqMap["authorization"].(string), "clx")
+	if auth, ok := reqMap["authorization"].(string); ok {
+		return utils.ExtractFromToken(auth, "clx")
 	}
 	return ""
 }
 
-func serveRequest(requestMap map[string]interface{}, tDChanIndex int, sDChanIndex int) {
-	if requestMap["path"] != nil {
-		requestMap["path"] = utils.UrlToPath(requestMap["path"].(string)) // replace slash with dot
+// isInternalAction reports whether the request is one of the
+// internal-only control actions (kill-subscriptions, cancel-subscription)
+// that bypass the normal validation/auth path and go straight to
+// serviceDataChan. Extracted from issueServiceRequest in PR #128 so the
+// predicate can be unit-tested. See vissv2server_dispatch_test.go.
+func isInternalAction(action string) bool {
+	return action == "internal-killsubscriptions" || action == "internal-cancelsubscription"
+}
+
+// isUnsubscribeRequest reports whether the request action is the
+// client-driven "unsubscribe" — these are forwarded directly to
+// serviceDataChan from serveRequest without going through the
+// validation/auth pipeline in issueServiceRequest. Extracted in PR #128.
+func isUnsubscribeRequest(action string) bool {
+	return action == "unsubscribe"
+}
+
+// setErrorAndForward fills errorResponseMap with the given error code
+// and description (using the request fields from requestMap) and pushes
+// it to the backend channel for the transport manager identified by
+// tDChanIndex. Extracted in PR #128 — the SetErrorResponse → backendChan
+// → return pattern was duplicated inline six times inside
+// issueServiceRequest, and the function-level deduplication makes the
+// happy path much easier to read.
+func setErrorAndForward(requestMap map[string]interface{}, tDChanIndex int, errorIndex int, description string) {
+	utils.SetErrorResponse(requestMap, errorResponseMap, errorIndex, description)
+	backendChan[tDChanIndex] <- errorResponseMap
+}
+
+// expandPathFilter takes the Parameter from a "paths" filter and the
+// request's rootPath, and returns the fully-qualified search paths.
+// The parameter is either a single path string or a JSON array of path
+// strings. Returns (paths, false) on malformed JSON so the caller can
+// emit the appropriate bad-request response. Extracted from
+// issueServiceRequest's filter loop in PR #128.
+func expandPathFilter(parameter string, rootPath string) ([]string, bool) {
+	if strings.Contains(parameter, "[") {
+		var searchPath []string
+		if err := json.Unmarshal([]byte(parameter), &searchPath); err != nil {
+			return nil, false
+		}
+		for i := range searchPath {
+			searchPath[i] = rootPath + "." + utils.UrlToPath(searchPath[i])
+		}
+		return searchPath, true
 	}
-	if requestMap["action"] == "unsubscribe" {
+	return []string{rootPath + "." + utils.UrlToPath(parameter)}, true
+}
+
+// authorizeAccess runs the per-request authorization check used by
+// issueServiceRequest. It encapsulates the (slightly tricky) logic of
+// when the auth token is actually consulted:
+//   - no authorization header  → errorCode 2 (auth required)
+//   - non-set request and the resource is write-only (validation%10==2
+//     would mean read-also-restricted) → skip the check entirely
+//   - authorization header present but not a string → errorCode 1
+//   - otherwise → delegate to verifyToken
+//
+// Extracted from issueServiceRequest in PR #128 so the dispatch
+// branches can be table-tested without the atsChannel goroutine.
+// (The verifyToken delegation path itself still requires a live ats
+// goroutine and is not covered by the new tests — same as before.)
+func authorizeAccess(requestMap map[string]interface{}, paths string, maxValidation int) (errorCode int, tokenHandle string, gatingId string) {
+	if requestMap["authorization"] == nil {
+		return 2, "", ""
+	}
+	action, _ := requestMap["action"].(string)
+	if action != "set" && maxValidation%10 != 2 { // no validation for get/sub when resource is write-only
+		return 0, "", ""
+	}
+	authToken, ok := requestMap["authorization"].(string)
+	if !ok {
+		return 1, "", ""
+	}
+	return verifyToken(authToken, action, paths, maxValidation)
+}
+
+func serveRequest(requestMap map[string]interface{}, tDChanIndex int, sDChanIndex int) {
+	if p, ok := requestMap["path"].(string); ok {
+		requestMap["path"] = utils.UrlToPath(p) // replace slash with dot
+	}
+	if action, _ := requestMap["action"].(string); isUnsubscribeRequest(action) {
 		serviceDataChan[sDChanIndex] <- requestMap
 		return
 	}
@@ -370,17 +488,21 @@ func serveRequest(requestMap map[string]interface{}, tDChanIndex int, sDChanInde
 }
 
 func issueServiceRequest(requestMap map[string]interface{}, tDChanIndex int, sDChanIndex int) {
-	if requestMap["action"] == "internal-killsubscriptions" || requestMap["action"] == "internal-cancelsubscription" {
+	if action, _ := requestMap["action"].(string); isInternalAction(action) {
 		serviceDataChan[sDChanIndex] <- requestMap // internal message
 		return
 	}
-	rootPath := requestMap["path"].(string)
+	rootPath, ok := requestMap["path"].(string)
+	if !ok {
+		utils.SetErrorResponse(requestMap, errorResponseMap, 1, "missing/invalid path")
+		backendChan[tDChanIndex] <- errorResponseMap
+		return
+	}
 	var VSSTreeRoot *utils.Node_t
 	if !(rootPath == "HIM" && requestMap["action"] == "get" && requestMap["filter"] != nil) {
 		VSSTreeRoot = utils.SetRootNodePointer(rootPath)
 		if VSSTreeRoot == nil {
-			utils.SetErrorResponse(requestMap, errorResponseMap, 0, "") //bad_request
-			backendChan[tDChanIndex] <- errorResponseMap
+			setErrorAndForward(requestMap, tDChanIndex, 0, "") //bad_request
 			return
 		}
 		requestMap["infoType"] = utils.GetInfoType(VSSTreeRoot)
@@ -396,21 +518,13 @@ func issueServiceRequest(requestMap map[string]interface{}, tDChanIndex int, sDC
 //			utils.Info.Printf("filterList[%d].Type=%s, filterList[%d].Parameter=%s", i, filterList[i].Type, i, filterList[i].Parameter)
 			// PATH FILTER
 			if filterList[i].Type == "paths" {
-				if strings.Contains(filterList[i].Parameter, "[") { // Various paths to search
-					err := json.Unmarshal([]byte(filterList[i].Parameter), &searchPath) // Writes in search path all values in filter
-					if err != nil {
-						utils.Error.Printf("Unmarshal filter path array failed.")
-						utils.SetErrorResponse(requestMap, errorResponseMap, 0, "") //bad_request
-						backendChan[tDChanIndex] <- errorResponseMap
-						return
-					}
-					for i := 0; i < len(searchPath); i++ {
-						searchPath[i] = rootPath + "." + utils.UrlToPath(searchPath[i]) // replaces slash with dot
-					}
-				} else { // Single path to search
-					searchPath = make([]string, 1)
-					searchPath[0] = rootPath + "." + utils.UrlToPath(filterList[i].Parameter) // replaces slash with dot
+				expanded, ok := expandPathFilter(filterList[i].Parameter, rootPath)
+				if !ok {
+					utils.Error.Printf("Unmarshal filter path array failed.")
+					setErrorAndForward(requestMap, tDChanIndex, 0, "") //bad_request
+					return
 				}
+				searchPath = expanded
 				break // only one paths object is allowed
 			}
 
@@ -439,8 +553,7 @@ func issueServiceRequest(requestMap map[string]interface{}, tDChanIndex int, sDC
 				}
 				}
 				utils.Error.Printf("Metadata error")
-				utils.SetErrorResponse(requestMap, errorResponseMap, 0, "") //bad_request
-				backendChan[tDChanIndex] <- errorResponseMap
+				setErrorAndForward(requestMap, tDChanIndex, 0, "") //bad_request
 				return
 			}
 		}
@@ -464,16 +577,27 @@ func issueServiceRequest(requestMap map[string]interface{}, tDChanIndex int, sDC
 			paths += "\"" + string(searchData[i].NodePath[:pathLen]) + "\", "
 		}
 		if matches == 0 {
-			utils.SetErrorResponse(requestMap, errorResponseMap, 6, "") //unavailable_data
-			backendChan[tDChanIndex] <- errorResponseMap
+			setErrorAndForward(requestMap, tDChanIndex, 6, "") //unavailable_data
 			return
 		}
-		if requestMap["action"] == "set" && strings.Contains(utils.VSSgetDatatype(searchData[0].NodeHandle)[:5], "Types") {
-			res := verifyStruct(requestMap["value"].(map[string]interface{}), utils.VSSgetDatatype(searchData[0].NodeHandle), 0)
-			if res != "ok" {
-				utils.SetErrorResponse(requestMap, errorResponseMap, 1, res) //invalid_data
-				backendChan[tDChanIndex] <- errorResponseMap
-				return
+		if requestMap["action"] == "set" {
+			// Bug fix: previous code did `VSSgetDatatype(...)[:5]` which
+			// panicked when the datatype string was shorter than 5 chars
+			// (e.g. "int", "bool"). Use strings.HasPrefix instead.
+			datatype := utils.VSSgetDatatype(searchData[0].NodeHandle)
+			if strings.HasPrefix(datatype, "Types") {
+				val, ok := requestMap["value"].(map[string]interface{})
+				if !ok {
+					utils.SetErrorResponse(requestMap, errorResponseMap, 1, "struct value must be an object")
+					backendChan[tDChanIndex] <- errorResponseMap
+					return
+				}
+				res := verifyStruct(val, datatype, 0)
+				if res != "ok" {
+					utils.SetErrorResponse(requestMap, errorResponseMap, 1, res) //invalid_data
+					backendChan[tDChanIndex] <- errorResponseMap
+					return
+				}
 			}
 		}
 		totalMatches += matches
@@ -486,11 +610,14 @@ func issueServiceRequest(requestMap map[string]interface{}, tDChanIndex int, sDC
 	}
 	errorIndex, errorDescription := validateData(requestMap, searchData, filterList)
 	if errorIndex != -1 {
-		utils.SetErrorResponse(requestMap, errorResponseMap, errorIndex, errorDescription)
-		backendChan[tDChanIndex] <- errorResponseMap
+		setErrorAndForward(requestMap, tDChanIndex, errorIndex, errorDescription)
 		return
 	}
-	paths = paths[:len(paths)-2]
+	// Defensive: paths is built ", "-separated from at least one match (matches==0
+	// returned early above). Trim only when there's content.
+	if len(paths) >= 2 {
+		paths = paths[:len(paths)-2]
+	}
 	if totalMatches > 1 {
 		paths = "[" + paths + "]"
 	}
@@ -506,31 +633,20 @@ func issueServiceRequest(requestMap map[string]interface{}, tDChanIndex int, sDC
 	case 1:
 		fallthrough
 	case 2:
-		errorCode := 0
-		if requestMap["authorization"] == nil {
-			errorCode = 2
-		} else {
-			if requestMap["action"] == "set" || maxValidation%10 == 2 { // no validation for get/subscribe when validation is 1 (write-only)
-				// checks if requestmap authorization is a string
-				if authToken, ok := requestMap["authorization"].(string); !ok {
-					errorCode = 1
-				} else {
-					errorCode, tokenHandle, gatingId = verifyToken(authToken, requestMap["action"].(string), paths, maxValidation)
-				}
-			}
-		}
+		errorCode, handle, gId := authorizeAccess(requestMap, paths, maxValidation)
+		tokenHandle = handle
+		gatingId = gId
 		if errorCode != 0 {
 			setTokenErrorResponse(requestMap, errorCode)
 			backendChan[tDChanIndex] <- errorResponseMap
 			return
 		}
 	default: // should not be possible...
-		utils.SetErrorResponse(requestMap, errorResponseMap, 7, "") //service_unavailable
-		backendChan[tDChanIndex] <- errorResponseMap
+		setErrorAndForward(requestMap, tDChanIndex, 7, "") //service_unavailable
 		return
 	}
-	if totalMatches == 1 {
-		paths = paths[1 : len(paths)-1] // remove hyphens
+	if totalMatches == 1 && len(paths) >= 2 {
+		paths = paths[1 : len(paths)-1] // remove surrounding quotes
 	}
 	requestMap["path"] = paths
 	if tokenHandle != "" {
@@ -590,27 +706,37 @@ func verifyStructMember(memberName string, typeSearch []utils.SearchData_t, matc
 
 func validateData(requestMap map[string]interface{}, searchData []utils.SearchData_t, filterList []utils.FilterObject) (int, string) { // -1, "" means valid data
 	if requestMap["action"] == "set" && utils.VSSgetType(searchData[0].NodeHandle) != utils.ACTUATOR {
-		return 1, "Forbidden to write to read-only resource"  //invalid_data
+		return 1, "Forbidden to write to read-only resource" //invalid_data
 	}
-	if requestMap["filter"] != nil {
-		for i := 0; i < len(filterList); i++ {
-			var paramMap map[string]interface{}
-			if filterList[i].Type == "range" { //parameter:[{"logic-op":"a", "boundary": "x", "combination-op":"b"},{"logic-op":"c", "boundary": "y"}]
-				utils.MapRequest(filterList[i].Parameter, &paramMap)
-				bVal1, bVal2 := getRangeBoundaries(paramMap)
-				if !utils.IsNumber(bVal1) || (len(bVal2) != 0 && !utils.IsNumber(bVal2)) {  // number ok, one or two boundaries
-					return 1, "Invalid range boundary datatype"
-				}
-			} else if filterList[i].Type == "change" { //parameter:{"logic-op":"a", "diff": "x"}
-				utils.MapRequest(filterList[i].Parameter, &paramMap)
-				if !utils.IsNumber(paramMap["diff"].(string)) && !utils.IsBoolean(paramMap["diff"].(string)) { // number or boolean ok
-					return 1, "Invalid change diff datatype"
-				}
-			} else if filterList[i].Type == "curvelog" { //parameter:{"maxerr":"a", "bufsize": "x"}
-				utils.MapRequest(filterList[i].Parameter, &paramMap)
-				if !utils.IsNumber(paramMap["maxerr"].(string)) {  // number ok
-					return 1, "Invalid curve log maxerr datatype"
-				}
+	if requestMap["filter"] == nil {
+		return -1, ""
+	}
+	for i := 0; i < len(filterList); i++ {
+		var paramMap map[string]interface{}
+		switch filterList[i].Type {
+		case "range": //parameter:[{"logic-op":"a", "boundary": "x", "combination-op":"b"},{"logic-op":"c", "boundary": "y"}]
+			utils.MapRequest(filterList[i].Parameter, &paramMap)
+			bVal1, bVal2 := getRangeBoundaries(paramMap)
+			if !utils.IsNumber(bVal1) || (len(bVal2) != 0 && !utils.IsNumber(bVal2)) { // number ok, one or two boundaries
+				return 1, "Invalid range boundary datatype"
+			}
+		case "change": //parameter:{"logic-op":"a", "diff": "x"}
+			utils.MapRequest(filterList[i].Parameter, &paramMap)
+			diff, ok := paramMap["diff"].(string)
+			if !ok {
+				return 1, "change filter missing/invalid diff"
+			}
+			if !utils.IsNumber(diff) && !utils.IsBoolean(diff) { // number or boolean ok
+				return 1, "Invalid change diff datatype"
+			}
+		case "curvelog": //parameter:{"maxerr":"a", "bufsize": "x"}
+			utils.MapRequest(filterList[i].Parameter, &paramMap)
+			maxerr, ok := paramMap["maxerr"].(string)
+			if !ok {
+				return 1, "curvelog filter missing/invalid maxerr"
+			}
+			if !utils.IsNumber(maxerr) { // number ok
+				return 1, "Invalid curve log maxerr datatype"
 			}
 		}
 	}
@@ -641,32 +767,41 @@ func himJsonify() string {
 
 func removeLocalProperty(himMap map[string]interface{}) map[string]interface{} {
 	for _, v1 := range himMap {
-		for k2, _ := range v1.(map[string]interface{}) {
-			if k2 == "local" {
-				delete(v1.(map[string]interface{}), k2)
-			}
+		// Bug fix: previous code did `v1.(map[string]interface{})` without
+		// check - any non-map value in the parsed viss.him (string, number,
+		// array, null) panicked the whole server at startup.
+		inner, ok := v1.(map[string]interface{})
+		if !ok {
+			continue
 		}
+		delete(inner, "local")
 	}
 	return himMap
 }
 
 func getRangeBoundaries(paramMap interface{}) (string, string) {
-	var bVal []string = []string{"", ""}
+	var bVal = []string{"", ""}
 	switch pMap := paramMap.(type) {
-		case interface{}:
-			bVal[0] = getRangeBoundary(pMap.(map[string]interface{}))
-		case []interface{}:
-			for i := 0; i < len(pMap); i++ {
-				if i > 1 {
-					utils.Error.Printf("Range array size too big. Len=%d", len(pMap))
-					break
-				}
-				bVal[i] = getRangeBoundary(pMap[i].(map[string]interface{}))
+	case []interface{}:
+		for i := 0; i < len(pMap); i++ {
+			if i > 1 {
+				utils.Error.Printf("Range array size too big. Len=%d", len(pMap))
+				break
 			}
-		default:
-			utils.Info.Println(pMap, "is of an unknown type")
+			// Bug fix: defensive .(map[string]interface{}) - array elements
+			// could be strings/numbers from malformed JSON.
+			elem, ok := pMap[i].(map[string]interface{})
+			if !ok {
+				utils.Error.Printf("getRangeBoundaries: element %d not an object", i)
+				continue
+			}
+			bVal[i] = getRangeBoundary(elem)
+		}
+	case map[string]interface{}:
+		bVal[0] = getRangeBoundary(pMap)
+	default:
+		utils.Info.Println(pMap, "is of an unknown type")
 	}
-//utils.Info.Printf("bVal1=%s, bVal2=%s", bVal[0], bVal[1])
 	return bVal[0], bVal[1]
 }
 
@@ -687,48 +822,84 @@ func getRangeBoundary(pMap map[string]interface{}) string {
 }
 
 func initiateFileTransfer(requestMap map[string]interface{}, nodeType string, path string) map[string]interface{} {
-//utils.Info.Printf("initiateFileTransfer: requestMap[action]=%s, nodeType=%d", requestMap["action"], nodeType)
 	var ftInitData utils.FileTransferCache
 	var responseMap = map[string]interface{}{}
+	routerId, _ := requestMap["RouterId"].(string)
 	if requestMap["action"] == "set" && nodeType == utils.ACTUATOR { // download
+		// requestMap["value"] arrives from client JSON. If the client
+		// sends a non-object value (e.g. a bare string) for a
+		// FileDescriptor actuator, the previous direct
+		// .(interface{}) cast plus getFileDescriptorData's internal
+		// .(map[string]interface{}) panic-walked into a daemon
+		// crash. Type-check up front and reject malformed inputs.
+		if requestMap["value"] == nil {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 1, "missing value for FileDescriptor set")
+			return errorResponseMap
+		}
 		var uidString string
 		ftInitData.UploadTransfer = false
-		ftInitData.Name, ftInitData.Hash, uidString = getFileDescriptorData(requestMap["value"].(interface{}))
-		uidByte, _ := hex.DecodeString(uidString)
-		ftInitData.Uid = [utils.UIDLEN]byte(uidByte)
-		ftInitData.Path = "./"  //get it from statestorage when vss-tools have updated.
+		ftInitData.Name, ftInitData.Hash, uidString = getFileDescriptorData(requestMap["value"])
+		if ftInitData.Name == "" {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 1, "invalid file descriptor")
+			return errorResponseMap
+		}
+		// Bug fix: hex.DecodeString error discarded; conversion to fixed array panicked on length mismatch.
+		uidByte, err := hex.DecodeString(uidString)
+		if err != nil || len(uidByte) != utils.UIDLEN {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 1, "invalid uid")
+			return errorResponseMap
+		}
+		copy(ftInitData.Uid[:], uidByte)
+		ftInitData.Path = "./" //get it from statestorage when vss-tools have updated.
+
+		// Bug fix: serialize the shared-channel RPC over ftChannel to prevent
+		// two concurrent file transfers from interleaving their responses.
+		ftChannelMu.Lock()
 		ftChannel <- ftInitData
-		ftInitData = <- ftChannel
+		ftInitData = <-ftChannel
+		ftChannelMu.Unlock()
+
 		if ftInitData.Status == 0 {
-			responseMap["RouterId"] = requestMap["RouterId"].(string)
+			responseMap["RouterId"] = routerId
 			responseMap["action"] = "set"
 			responseMap["ts"] = utils.GetRfcTime()
 			return responseMap
-		} else {
-			utils.SetErrorResponse(requestMap, errorResponseMap, 7, "") //service_unavailable
+		}
+		utils.SetErrorResponse(requestMap, errorResponseMap, 7, "") //service_unavailable
+		return errorResponseMap
+
+	} else if requestMap["action"] == "get" && nodeType == utils.SENSOR { //upload
+		reqPath, ok := requestMap["path"].(string)
+		if !ok {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 1, "missing/invalid path")
 			return errorResponseMap
 		}
-		
-	} else if requestMap["action"] == "get" && nodeType == utils.SENSOR { //upload
-		if requestMap["path"] != nil {
-			path := requestMap["path"].(string)
-			ftInitData.UploadTransfer = true
-			ftInitData.Path, ftInitData.Name = getInternalFileName(path)
-			ftInitData.Hash = calculateHash(ftInitData.Path + ftInitData.Name)
-			uidByte, _ := hex.DecodeString("2d878213")  //TODO: random generation
-			ftInitData.Uid = [utils.UIDLEN]byte(uidByte)
-			ftChannel <- ftInitData
-			_ = <- ftChannel
-			responseMap["RouterId"] = requestMap["RouterId"].(string)
-			responseMap["action"] = "get"
-			responseMap["path"] = path
-			responseMap["value"] = `{"name": "` + ftInitData.Name + `", "hash":"` + ftInitData.Hash + `","uid":"` + hex.EncodeToString(ftInitData.Uid[:]) + `"}`
-			responseMap["ts"] = utils.GetRfcTime()
-			return responseMap
-/*			return `{"RouterId": "` + requestMap["RouterId"].(string) + `"action": "get", "path":"` + path +
-				`", "value":{"name": "` + ftInitData.Name + `", "hash":"` + ftInitData.Hash + `","uid":"` + hex.EncodeToString(ftInitData.Uid[:]) + `"}, ` +
-				`"ts": "` + utils.GetRfcTime() + `"}`*/
+		ftInitData.UploadTransfer = true
+		ftInitData.Path, ftInitData.Name = getInternalFileName(reqPath)
+		if ftInitData.Name == "" {
+			// Bug fix: previously every unknown path silently mapped to
+			// "upload.txt"; that's a path-injection hazard. Reject unknown paths.
+			utils.SetErrorResponse(requestMap, errorResponseMap, 1, "unknown upload path")
+			return errorResponseMap
 		}
+		ftInitData.Hash = calculateHash(ftInitData.Path + ftInitData.Name)
+		// Bug fix: previous code used a hardcoded uid ("2d878213"); now generate a random one.
+		if _, err := rand.Read(ftInitData.Uid[:]); err != nil {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 7, "")
+			return errorResponseMap
+		}
+
+		ftChannelMu.Lock()
+		ftChannel <- ftInitData
+		_ = <-ftChannel
+		ftChannelMu.Unlock()
+
+		responseMap["RouterId"] = routerId
+		responseMap["action"] = "get"
+		responseMap["path"] = reqPath
+		responseMap["value"] = `{"name": "` + ftInitData.Name + `", "hash":"` + ftInitData.Hash + `","uid":"` + hex.EncodeToString(ftInitData.Uid[:]) + `"}`
+		responseMap["ts"] = utils.GetRfcTime()
+		return responseMap
 	}
 	utils.SetErrorResponse(requestMap, errorResponseMap, 1, "") //invalid_data
 	return errorResponseMap
@@ -750,53 +921,71 @@ func calculateHash(fileName string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func getInternalFileName(path string) (string, string) {  // maps between tree paths and files in the vehicle file system
+// getInternalFileName maps between tree paths and files in the vehicle file
+// system. Unknown paths return ("", "") so the caller rejects the request
+// rather than silently writing/reading "upload.txt" for any input path.
+func getInternalFileName(path string) (string, string) {
 	switch path {
-		case "Vehicle.UploadFile": return "", "upload.txt"
+	case "Vehicle.UploadFile":
+		return "", "upload.txt"
 	}
-	return "", "upload.txt"
+	return "", ""
 }
 
 func getFileDescriptorData(value interface{}) (string, string, string) { // {"name": "xxx","hash": "yyy","uid": "zzz"}
+	m, ok := value.(map[string]interface{})
+	if !ok {
+		return "", "", ""
+	}
 	var name, hash, uid string
-	for k, v := range value.(map[string]interface{}) {
-		switch vv := v.(type) {
-		case string:
-//			utils.Info.Println(k, "is string", vv)
-			if k == "name" {
-				name = vv
-			} else if k == "hash" {
-				hash = vv
-			} else if k == "uid" {
-				uid = vv
-			} else {
-				utils.Info.Println(k, "is of an unknown type")
-				return "", "", ""
-			}
-		default:
-			utils.Info.Println(k, "is of an unknown type")
+	for k, v := range m {
+		vv, ok := v.(string)
+		if !ok {
 			return "", "", ""
+		}
+		switch k {
+		case "name":
+			name = vv
+		case "hash":
+			hash = vv
+		case "uid":
+			uid = vv
+		default:
+			// Unknown keys: log and ignore rather than fail outright.
+			utils.Info.Printf("getFileDescriptorData: unknown key %q", k)
 		}
 	}
 	return name, hash, uid
 }
 
 func initChannels() {
+	// Bug fix: all pipeline channels are now buffered so a slow consumer
+	// (slow client, slow backend, slow access-token server) cannot wedge the
+	// dispatcher loop. atsChannel[0] and ftChannel stay unbuffered because
+	// they're explicitly serialized request/response by atsChannelMu /
+	// ftChannelMu.
+	const pipelineBuf = 32
 	ftChannel = make(chan utils.FileTransferCache)
 	serviceMgrChannel = make([]chan map[string]interface{}, 1)
-	serviceMgrChannel[0] = make(chan map[string]interface{})
+	serviceMgrChannel[0] = make(chan map[string]interface{}, pipelineBuf)
 	serviceDataChan = make([]chan map[string]interface{}, 1)
-	serviceDataChan[0] = make(chan map[string]interface{})
+	serviceDataChan[0] = make(chan map[string]interface{}, pipelineBuf)
 	transportMgrChannel = make([]chan string, NUMOFTRANSPORTMGRS)
 	transportDataChan = make([]chan map[string]interface{}, NUMOFTRANSPORTMGRS)
 	backendChan = make([]chan map[string]interface{}, NUMOFTRANSPORTMGRS)
 	for i := 0; i < NUMOFTRANSPORTMGRS; i++ {
-		transportMgrChannel[i] = make(chan string)
-		transportDataChan[i] = make(chan map[string]interface{})
-		backendChan[i] = make(chan map[string]interface{})
+		transportMgrChannel[i] = make(chan string, pipelineBuf)
+		transportDataChan[i] = make(chan map[string]interface{}, pipelineBuf)
+		backendChan[i] = make(chan map[string]interface{}, pipelineBuf)
 	}
+	// MQTT's channel must stay unbuffered. MqttMgrInit performs a synchronous
+	// VIN-fetch by sending on and receiving from the same channel in one
+	// goroutine. A buffered channel causes an echo: the goroutine reads its own
+	// send before transportDataSession can consume it. Unbuffered forces the
+	// send to block until transportDataSession reads, preserving ordering.
+	transportMgrChannel[2] = make(chan string)
 	atsChannel = make([]chan string, 2)
-	atsChannel[0] = make(chan string) // access token verification
+	atsChannel[0] = make(chan string) // access token verification (serialized by atsChannelMu)
 	atsChannel[1] = make(chan string) // token cancellation
 }
 
@@ -830,6 +1019,7 @@ func main() {
 	err := parser.Parse(os.Args)
 	if err != nil {
 		fmt.Print(parser.Usage(err))
+		os.Exit(1)
 	}
 
 	utils.InitLog("servercore-log.txt", "./logs", *logFile, *logLevel)
@@ -913,7 +1103,7 @@ func main() {
 			serveRequest(request, 4, 0)
 		case gatingId := <-atsChannel[1]:
 //			request := `{"action": "internal-cancelsubscription", "gatingId":"` + gatingId + `"}`
-			var request map[string]interface{}
+			request := map[string]interface{}{}
 			request["action"] = "internal-cancelsubscription"
 			request["gatingId"] = gatingId
 			serveRequest(request, 0, 0)

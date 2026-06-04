@@ -39,7 +39,7 @@ stopme() {
 	screen -wipe
 }
 
-if [ $# -ne 1 ];
+if [ $# -ne 1 ] && [ $# -ne 2 ];
 then
 	usage $0
 	exit 1
