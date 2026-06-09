@@ -1,0 +1,1442 @@
+<!DOCTYPE html>
+<html lang="en" class="js csstransforms3d">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="generator" content="Hugo 0.103.1" />
+    <meta name="description" content="">
+
+
+    <link rel="shortcut icon" href="/vissr/images/fav.png" type="image/x-icon" />
+
+    <title>VISSR Hello World example :: COVESA VISSv2 Reference Implementation (vissr)</title>
+
+    
+    <link href="/vissr/css/nucleus.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/fontawesome-all.min.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/hybrid.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/featherlight.min.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/perfect-scrollbar.min.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/auto-complete.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/atom-one-dark-reasonable.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/theme.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/tabs.css?1780995056" rel="stylesheet">
+    <link href="/vissr/css/hugo-theme.css?1780995056" rel="stylesheet">
+    
+    <link href="/vissr/css/theme-blue.css?1780995056" rel="stylesheet">
+    
+    
+
+    <script src="/vissr/js/jquery-3.3.1.min.js?1780995056"></script>
+
+    <style>
+      :root #header + #content > #left > #rlblock_left{
+          display:none !important;
+      }
+      
+        :not(pre) > code + span.copy-to-clipboard {
+            display: none;
+        }
+      
+    </style>
+    
+  </head>
+  <body class="" data-url="/vissr/build-system/hello-world/">
+    <nav id="sidebar" class="">
+
+
+
+  <div id="header-wrapper">
+    <div id="header">
+      <a id="logo" href="https://covesa.github.io/vissr/">
+  <img src="/vissr/images/vissv2.png">
+</a>
+
+    </div>
+    
+        <div class="searchbox">
+    <label for="search-by"><i class="fas fa-search"></i></label>
+    <input data-search-input id="search-by" type="search" placeholder="Search...">
+    <span data-search-clear=""><i class="fas fa-times"></i></span>
+</div>
+
+<script type="text/javascript" src="/vissr/js/lunr.min.js?1780995056"></script>
+<script type="text/javascript" src="/vissr/js/auto-complete.js?1780995056"></script>
+<script type="text/javascript">
+    
+        var baseurl = "https:\/\/covesa.github.io\/vissr\/";
+    
+</script>
+<script type="text/javascript" src="/vissr/js/search.js?1780995056"></script>
+
+    
+  </div>
+  
+
+    <div class="highlightable">
+    <ul class="topics">
+
+        
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/build-system/" title="VISSR Build System" class="dd-item
+        parent
+        
+        
+        ">
+      <a href="/vissr/build-system/">
+          VISSR Build System
+          
+      </a>
+      
+      
+        <ul>
+          
+          
+            
+          
+          
+
+        
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/build-system/hello-world/" title="VISSR Hello World example" class="dd-item
+        
+        active
+        
+        ">
+      <a href="/vissr/build-system/hello-world/">
+          VISSR Hello World example
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+        
+        </ul>
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/client/" title="VISSR Clients" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/client/">
+          VISSR Clients
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/datastore/" title="VISSR Data Storage" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/datastore/">
+          VISSR Data Storage
+          
+      </a>
+      
+      
+        <ul>
+          
+          
+            
+          
+          
+
+        
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/datastore/apache-iotdb/" title="VISSR Apache IoTDB" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/datastore/apache-iotdb/">
+          VISSR Apache IoTDB
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/datastore/memcached/" title="VISSR Memcached" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/datastore/memcached/">
+          VISSR Memcached
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/datastore/redis/" title="VISSR Redis" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/datastore/redis/">
+          VISSR Redis
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/datastore/sqlite/" title="VISSR SQLite" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/datastore/sqlite/">
+          VISSR SQLite
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+        
+        </ul>
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/docker-step-by-step/" title="VISSR Docker" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/docker-step-by-step/">
+          VISSR Docker
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/feeder/" title="VISSR Feeders" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/feeder/">
+          VISSR Feeders
+          
+      </a>
+      
+      
+        <ul>
+          
+          
+            
+          
+          
+
+        
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/feeder/feederv3/" title="VISSR Feederv3" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/feeder/feederv3/">
+          VISSR Feederv3
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+        
+        </ul>
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/peripheral-components/" title="VISSR peripheral components" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/peripheral-components/">
+          VISSR peripheral components
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/pocs/" title="VISSR POCs" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/pocs/">
+          VISSR POCs
+          
+      </a>
+      
+      
+        <ul>
+          
+          
+            
+          
+          
+
+        
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/pocs/poc6/" title="Creation of truck and trailer trees that are used in a client-server scenario using VISS as the interface" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/pocs/poc6/">
+          Creation of truck and trailer trees that are used in a client-server scenario using VISS as the interface
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/pocs/poc2/" title="Empowering digital services: VISS API towards Android Automotive OS" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/pocs/poc2/">
+          Empowering digital services: VISS API towards Android Automotive OS
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/pocs/poc7/" title="Next POC..." class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/pocs/poc7/">
+          Next POC...
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/pocs/poc5/" title="Scaling Vehicle Data Innovation: VISSR and NoSQL Document Databases" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/pocs/poc5/">
+          Scaling Vehicle Data Innovation: VISSR and NoSQL Document Databases
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/pocs/poc1/" title="Test run of the different VISSR supported protocols" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/pocs/poc1/">
+          Test run of the different VISSR supported protocols
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/pocs/poc4/" title="VISS Feeder Domain Conversion Explained and Demonstrated" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/pocs/poc4/">
+          VISS Feeder Domain Conversion Explained and Demonstrated
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/pocs/poc3/" title="VISSv2 consent model explained and demoed" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/pocs/poc3/">
+          VISSv2 consent model explained and demoed
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+        
+        </ul>
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/server/" title="VISSR Server" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/server/">
+          VISSR Server
+          
+      </a>
+      
+      
+        <ul>
+          
+          
+            
+          
+          
+
+        
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/server/access-control-servers/" title="VISSR Access Control Servers" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/server/access-control-servers/">
+          VISSR Access Control Servers
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+            
+            
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/server/binary-tree-config/" title="VISSR binary tree configuration" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/server/binary-tree-config/">
+          VISSR binary tree configuration
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+            
+          
+        
+        </ul>
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/tools/" title="VISSR Tools" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/tools/">
+          VISSR Tools
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+          
+          
+
+
+
+
+ 
+  
+    
+    <li data-nav-id="/vissr/xtra/" title="VISSR Xtra Information" class="dd-item
+        
+        
+        
+        ">
+      <a href="/vissr/xtra/">
+          VISSR Xtra Information
+          
+      </a>
+      
+      
+    </li>
+  
+ 
+
+          
+        
+    </ul>
+
+    
+    
+      <section id="shortcuts">
+        <h3>More</h3>
+        <ul>
+          
+              <li>
+                  <a class="padding" href="https://github.com/covesa/vissr"><i class='fab fa-github'></i> Github repo</a>
+              </li>
+          
+        </ul>
+      </section>
+    
+
+    
+    <section id="footer">
+      <p>Built with <a href="https://github.com/matcornic/hugo-theme-learn"><i class="fas fa-heart"></i></a> from <a href="https://getgrav.org">Grav</a> and <a href="https://gohugo.io/">Hugo</a></p>
+
+    </section>
+  </div>
+</nav>
+
+
+
+
+        <section id="body">
+        <div id="overlay"></div>
+        <div class="padding highlightable">
+              
+              <div>
+                <div id="top-bar">
+                
+                  
+                  
+                  
+                  <div id="top-github-link">
+                    <a class="github-link" title='Edit this page' href="https://github.com/covesa/vissr/edit/master/tutorial/content/build-system/hello-world/_index.md" target="blank">
+                      <i class="fas fa-code-branch"></i>
+                      <span id="top-github-link-text">Edit this page</span>
+                    </a>
+                  </div>
+                  
+                
+                
+                <div id="breadcrumbs" itemscope="" itemtype="http://data-vocabulary.org/Breadcrumb">
+                    <span id="sidebar-toggle-span">
+                        <a href="#" id="sidebar-toggle" data-sidebar-toggle="">
+                          <i class="fas fa-bars"></i>
+                        </a>
+                    </span>
+                  
+                  <span id="toc-menu"><i class="fas fa-list-alt"></i></span>
+                  
+                  <span class="links">
+                 
+                 
+                    
+          
+          
+            
+            
+          
+          
+            
+            
+          
+          
+            <a href='/vissr/'>COVESA Vehicle Information Service Specification version 3.1 Reference Implementation Tutorial</a> > <a href='/vissr/build-system/'>VISSR Build System</a> > VISSR Hello World example
+          
+        
+          
+        
+          
+        
+                 
+                  </span>
+                </div>
+                
+                    <div class="progress">
+    <div class="wrapper">
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#native-build-based-hello-world-example">Native build based Hello World example</a></li>
+    <li><a href="#docker-based-hello-world-example">Docker based Hello World example</a></li>
+  </ul>
+</nav>
+    </div>
+</div>
+
+                
+              </div>
+            </div>
+            
+        <div id="head-tags">
+        
+        </div>
+        
+        <div id="body-inner">
+          
+            <h1>
+              
+              VISSR Hello World example
+            </h1>
+          
+
+        
+
+
+
+	<p>Two Hello World alternatives are available:</p>
+<ul>
+<li><a href="/vissr/build-system/hello-world/#native-build-based-hello-world-example">Native build</a> based example</li>
+<li><a href="/vissr/build-system/hello-world/#docker-based-hello-world-example">Docker</a> based example</li>
+</ul>
+<h2 id="native-build-based-hello-world-example">Native build based Hello World example</h2>
+<p>Building the server and many other software components require that the Golang build system is installed on the computer,
+please see <a href="/vissr/build-system/#installing-golang">here</a> how to get that done.
+The next step is to clone the <a href="https://github.com/COVESA/vissr">VISSR</a> repo.</p>
+<pre tabindex="0"><code>$ git clone https://github.com/COVESA/vissr.git
+</code></pre><p>This is followed by going to the directory where the main server code is located, and build the server.</p>
+<pre tabindex="0"><code>$ cd vissr/server/vissv2server/
+$ go build
+</code></pre><p>This could be followed by directly starting a client to issue requests to the server,
+but the server would then try to read data from an empty data store, so all responses would say &lsquo;visserr:Data-not-available&rsquo;.
+To be able to get some real data back we will therefore start a feeder that will write simulated data into the data store.</p>
+<p>To do this, open a new terminal window, go to the feederv3 directory, and build the feeder.</p>
+<pre tabindex="0"><code>$ cd vissr/feeder/feeder-template/feederv3/
+$ go build
+</code></pre><p>Now we can start the server and the feeder in respective terminal window.
+The server will connect to the feeder, so to avoid server logs complaining it cannot find the feeder it is preferred to start the feeder first.</p>
+<pre tabindex="0"><code>$ ./feederv3
+$ ./vissv2server
+</code></pre><p>Both the server and the feeder will by default be configured to use Redis for the data store.
+This requires that Redis has been installed on the computer, how to do this can be read <a href="https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/">here</a>.
+Other data stores can be configured, more info can be found <a href="/vissr/datastore/">here</a>.</p>
+<p>Now it is time to start a client, there are many clients to be found in the client directory and subdirectories.
+We will here use the Javascript based client that connects via the Websocket protocol.
+But first we need to find out the IP address of the computer as the client connects to the server over a socket based on this address.
+How to do that can e. g. be found <a href="https://www.wikihow.com/Check-a-Computer-IP-Address">here</a>, on Ubuntu the command</p>
+<pre tabindex="0"><code>$ ifconfig
+</code></pre><p>can be used. You will then have to search through a lot of information for an address that likely starts with &lsquo;192.168&rsquo; followed by two more segments.
+Please copy this and use the file browser on the computer to go to the client/client-1.0/Javascript directory.
+There you click on the file &lsquo;wsclient_uncompressed.html&rsquo;, which leads to that it starts up in the browser.
+You will there see a field whch says &lsquo;host ip&rsquo;, please paste the IP address in there and click on the button to the right that says &lsquo;Server IP&rsquo;.
+The client will then print &lsquo;Status: Connected&rsquo; in the area below if it succeeds to connect.
+Now we can start to issue client requests to the server by pasting or writing them into the field where it says &lsquo;JSON payload,
+followed by clicking on the button &lsquo;Send&rsquo;.
+Try with the command</p>
+<pre tabindex="0"><code>{&#34;action&#34;:&#34;get&#34;,&#34;path&#34;:&#34;Vehicle.Cabin.Door.Row1.DriverSide.IsOpen&#34;,&#34;requestId&#34;:&#34;232&#34;}
+</code></pre><p>which should return a response like the below.</p>
+<pre tabindex="0"><code>Server: {&#34;action&#34;:&#34;get&#34;,&#34;requestId&#34;:&#34;232&#34;,&#34;ts&#34;:&#34;2024-11-12T11:26:44.546855082Z&#34;, &#34;data&#34;:{&#34;path&#34;:&#34;Vehicle.Cabin.Door.Row1.DriverSide.IsOpen&#34;, &#34;dp&#34;:{&#34;value&#34;:&#34;visserr:Data-not-available&#34;, &#34;ts&#34;:&#34;2024-11-12T11:26:44.548180993Z&#34;}}}
+</code></pre><p>The value is set to &lsquo;visserr:Data-not-available&rsquo; which is due to that the federv3 is not instructed to create simulated values for this signal.
+At startup the feederv3 reads the file VssVehicle.cvt which has been created by the <a href="/vissr/tools/">Domain Conversion Tool</a>.
+This file contains the instructions for how signals are mapped and scaled when they traverse between the &lsquo;vehicle domain&rsquo; and the &lsquo;VSS domain&rsquo;,
+but the feederv3 also uses this information to select which signals to create simulated values for.
+The cvt-file that comes with the repo only contains the five signals that can be read in the tools/DomainConversionTool/Map-VSSv0.1-CANv0.1.yaml file.
+So if we want to get a response with a simulated value a client request to any of these signals must be issued, e. g. like below.
+An alternative would be to create a new cvt-file with more signals first.</p>
+<pre tabindex="0"><code>{&#34;action&#34;:&#34;get&#34;,&#34;path&#34;:&#34;Vehicle.Speed&#34;,&#34;requestId&#34;:&#34;232&#34;}
+</code></pre><p>Please issue this request, se the response, wait about 30 secs and issue it again.
+The values returned in the two responses should differ as the feeder randomly generates new values. If not wait another 30 secs and issue it again.
+This could more easily be seen if a time-based subscribe request is issued:</p>
+<pre tabindex="0"><code>{&#34;action&#34;:&#34;subscribe&#34;,&#34;path&#34;:&#34;Vehicle.Speed&#34;,&#34;filter&#34;:{&#34;variant&#34;:&#34;timebased&#34;,&#34;parameter&#34;:{&#34;period&#34;:&#34;10000&#34;}},&#34;requestId&#34;:&#34;246&#34;}
+</code></pre><p>The server will issue event messages every ten seconds, and it can after a number of events has been received be seen that the value is randomly changed.
+To unsubscribe, issue the request:</p>
+<pre tabindex="0"><code>{&#34;action&#34;:&#34;unsubscribe&#34;,&#34;subscriptionId&#34;:&#34;1&#34;,&#34;requestId&#34;:&#34;240&#34;}
+</code></pre><p>The file client/client-1.0/Javascript/appclient_commands.txt contains examples of different requests that can be used, either as is or modified.</p>
+<p>The feederv3 can at startup be configured to read simulated tripdata from files like &rsquo;tripdata.json&rsquo; or &lsquo;speed-sawtooth.json&rsquo;,
+the latter suitable if the curve log filter subscription is to be tested, maybe with a request like this:</p>
+<pre tabindex="0"><code>{&#34;action&#34;:&#34;subscribe&#34;,&#34;path&#34;:&#34;Vehicle.Speed&#34;,&#34;filter&#34;:{&#34;variant&#34;:&#34;curvelog&#34;,&#34;parameter&#34;:{&#34;maxerr&#34;:&#34;2&#34;,&#34;bufsize&#34;:&#34;18&#34;}},&#34;requestId&#34;:&#34;275&#34;}
+</code></pre><p>More simulation info can be found <a href="/vissr/feeder/#simulated-vehicle-data-sources">here</a>.
+These files can easily be modified and extended with data for more signals and longer trips.</p>
+<h2 id="docker-based-hello-world-example">Docker based Hello World example</h2>
+<p>The COVESA Central Data Service Playground <a href="https://github.com/COVESA/cdsp/blob/main/docker/README.md">README</a>
+describes a basic hello-world style sanity test for running VISSR in a Docker environment.</p>
+
+
+
+
+
+<footer class=" footline" >
+	
+</footer>
+
+        
+        </div>
+        
+
+      </div>
+
+    <div id="navigation">
+        
+        
+
+        
+            
+            
+                
+                    
+                    
+                
+                
+
+                    
+                    
+                        
+                    
+                    
+
+                    
+                        
+            
+            
+                
+                    
+                    
+                
+                
+
+                    
+                    
+                        
+                    
+                    
+
+                    
+                        
+            
+            
+                
+                    
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                        
+                        
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                        
+                    
+                    
+
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                        
+                    
+                    
+
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                        
+                    
+                    
+
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                        
+                    
+                    
+
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+                        
+            
+            
+                
+                    
+                
+                
+
+                    
+                    
+                    
+
+                    
+            
+        
+                    
+            
+        
+
+        
+
+
+	 
+	 
+		
+			<a class="nav nav-prev" href="/vissr/build-system/" title="VISSR Build System"> <i class="fa fa-chevron-left"></i></a>
+		
+		
+			<a class="nav nav-next" href="/vissr/client/" title="VISSR Clients" style="margin-right: 0px;"><i class="fa fa-chevron-right"></i></a>
+		
+	
+    </div>
+
+    </section>
+
+    <div style="left: -1000px; overflow: scroll; position: absolute; top: -1000px; border: none; box-sizing: content-box; height: 200px; margin: 0px; padding: 0px; width: 200px;">
+      <div style="border: none; box-sizing: content-box; height: 200px; margin: 0px; padding: 0px; width: 200px;"></div>
+    </div>
+    <script src="/vissr/js/clipboard.min.js?1780995056"></script>
+    <script src="/vissr/js/perfect-scrollbar.min.js?1780995056"></script>
+    <script src="/vissr/js/perfect-scrollbar.jquery.min.js?1780995056"></script>
+    <script src="/vissr/js/jquery.sticky.js?1780995056"></script>
+    <script src="/vissr/js/featherlight.min.js?1780995056"></script>
+    <script src="/vissr/js/highlight.pack.js?1780995056"></script>
+    <script>hljs.initHighlightingOnLoad();</script>
+    <script src="/vissr/js/modernizr.custom-3.6.0.js?1780995056"></script>
+    <script src="/vissr/js/learn.js?1780995056"></script>
+    <script src="/vissr/js/hugo-learn.js?1780995056"></script>
+    
+        
+            <script src="/vissr/mermaid/mermaid.js?1780995056"></script>
+        
+        <script>
+            mermaid.initialize({ startOnLoad: true });
+        </script>
+    
+    
+
+  </body>
+</html>
