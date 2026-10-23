@@ -178,10 +178,53 @@ func createRouterIdProperty(mgrId int, clientId int) string {
 	return "\"RouterId\":\"" + strconv.Itoa(mgrId) + "?" + strconv.Itoa(clientId) + "\""
 }
 
+// managerSetFields are the fields of a request that the server core trusts and that the transport managers
+// and the core set themselves. None of them is part of the request schema, so a client request must never
+// carry them:
+//
+//	RouterId   which manager and client the response is routed to
+//	origin     "internal" makes the core skip the access control check
+//	handle     the access token handle, set by the core after it has checked the token
+//	gatingId   set by the core after it has checked the token
+//	infoType   set by the core from the tree
+var managerSetFields = []string{"RouterId", "origin", "handle", "gatingId", "infoType"}
+
+// WithRoutingInfo returns the client request reqMessage with the fields that the managers decide:
+// the request is decoded, the fields in managerSetFields are removed whatever the client put in them,
+// and RouterId (mgrId?clientId) and origin "external" are set. It returns false if reqMessage is not a
+// JSON object, which a request cannot be.
+//
+// This replaced a splice of the new fields in front of the client's text. The client's own "origin" was
+// then still in the message, as a second "origin" key, and the decoder of the core (encoding/json) keeps the
+// last of two equal keys, so a client could add "origin":"internal" to its request and have the core skip the
+// access control for it. Decoding and encoding again leaves each field once, with the manager's value.
+func WithRoutingInfo(reqMessage string, mgrId int, clientId int) (string, bool) {
+	var requestMap map[string]json.RawMessage // RawMessage keeps every value as the client wrote it
+	decoder := json.NewDecoder(strings.NewReader(reqMessage))
+	if err := decoder.Decode(&requestMap); err != nil || requestMap == nil {
+		return "", false
+	}
+	if decoder.More() { // trailing data after the object
+		return "", false
+	}
+	for _, field := range managerSetFields {
+		delete(requestMap, field)
+	}
+	requestMap["RouterId"] = json.RawMessage(strconv.Quote(strconv.Itoa(mgrId) + "?" + strconv.Itoa(clientId)))
+	requestMap["origin"] = json.RawMessage(`"external"`)
+	request, err := json.Marshal(requestMap)
+	if err != nil {
+		return "", false
+	}
+	return string(request), true
+}
+
 func AddRoutingForwardRequest(reqMessage string, mgrId int, clientId int, transportMgrChan chan string) {
-	//	newPrefix := "{ \"RouterId\":\"" + strconv.Itoa(mgrId) + "?" + strconv.Itoa(clientId) + "\", "
-	newPrefix := "{" + createRouterIdProperty(mgrId, clientId) + ", " + "\"origin\":\"external\", "
-	request := strings.Replace(reqMessage, "{", newPrefix, 1)
+	request, ok := WithRoutingInfo(reqMessage, mgrId, clientId)
+	if !ok {
+		Error.Printf("AddRoutingForwardRequest: dropping a message that is not a JSON object: %.200s", reqMessage)
+		return
+	}
 	Info.Printf("AddRoutingForwardRequest: %s", request)
 	transportMgrChan <- request
 }
@@ -229,9 +272,9 @@ func splitToPathQueryKeyValue(path string) (string, string, string) {
 // Manages first communication with Client
 func frontendHttpAppSession(w http.ResponseWriter, req *http.Request, clientChannel chan string) {
 	path := req.RequestURI
-	if len(path) == 0 {
-		path = "empty-path" // will generate error as not found in VSS tree
-	}
+//	if len(path) == 0 {
+//		path = "empty-path" // will generate error as not found in VSS tree
+//	}
 	path = strings.ReplaceAll(path, "%22", "\"")
 	path = strings.ReplaceAll(path, "%20", "")
 	var requestMap = make(map[string]interface{})
@@ -255,8 +298,8 @@ func frontendHttpAppSession(w http.ResponseWriter, req *http.Request, clientChan
 		fallthrough // should work for POST also...
 	case "GET":
 		requestMap["action"] = "get"
-	case "POST": // set
-		requestMap["action"] = "set"
+	case "POST": // set / multi-set / multi-get
+//		requestMap["action"] = "set"
 		// Bound the request body before io.ReadAll. Without this an
 		// anonymous client can send a Content-Length: <huge> or a
 		// never-closing chunked body and ReadAll will allocate until
@@ -271,7 +314,18 @@ func frontendHttpAppSession(w http.ResponseWriter, req *http.Request, clientChan
 		}
 		var bodyMap map[string]interface{}
 		MapRequest(string(body), &bodyMap)
-		requestMap["value"] = bodyMap["value"]
+		if path == "" || path == "/" { // multi-set/get
+			delete(requestMap, "path")
+			if strings.Contains(string(body), "value") {
+				requestMap["action"] = "set"
+			} else {
+				requestMap["action"] = "get"
+			}
+			requestMap["data"] = bodyMap["data"]
+		} else { // set
+			requestMap["action"] = "set"
+			requestMap["value"] = bodyMap["value"]
+		}
 	default:
 		//		http.Error(w, "400 Unsupported method", http.StatusBadRequest)
 		Warning.Printf("Only GET and POST methods are supported.")

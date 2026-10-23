@@ -107,6 +107,7 @@ corpus entry.
 | `processHistoryCtrl` panic + index + bufSize cap                | `server/vissv2server/serviceMgr/serviceMgr_test.go`                                        |
 | `processHistoryGet` panic + index                               | `server/vissv2server/serviceMgr/serviceMgr_test.go`                                        |
 | `activate/deactivateInterval` ticker-leak                       | `server/vissv2server/serviceMgr/serviceMgr_test.go`                                        |
+| service manager handlers (`handleServiceSet/Get/Subscribe/Unsubscribe`, internal kill and cancel): a malformed request is an error response, not a panic | `server/vissv2server/serviceMgr/serviceMgr_assertions_test.go` |
 | `getBrokerSocket` env-var / fallback / TLS (mqttMgr)             | `server/vissv2server/mqttMgr/mqttMgr_test.go`                                              |
 | `JsonSchemaValidate` nil-deref guard                            | `utils/common_fixes_test.go`                                                               |
 | `WsClientIndexMu` race                                          | `utils/managerhandlers_test.go`                                                            |
@@ -148,9 +149,26 @@ corpus entry.
 | `calculateHash` (SHA-1)                  | `server/vissv2server/vissv2server_helpers_test.go`     |
 | `getRangeBoundary` / `getRangeBoundaries`| `server/vissv2server/vissv2server_helpers_test.go`     |
 | `FuzzGetRangeBoundaries`                 | `server/vissv2server/vissv2server_helpers_test.go`     |
+| `validateStructSetValue` / `verifyStruct` (struct-typed SET values, against the real `typedef.binary`) | `server/vissv2server/vissv2server_struct_test.go` |
+
+#### mqttMgr (reply-topic list, broker side and server loop)
+
+| Helper                                  | Test file                                              |
+|-----------------------------------------|--------------------------------------------------------|
+| `registerRequest` / `routeResponse` (entry released when the request is finished: get/set/discover, error responses, unsubscribe; kept while a subscription runs; no growth over many requests) | `server/vissv2server/mqttMgr/mqttMgr_topiclist_test.go` |
+| `mqttSubscribe` (success, connect error, subscribe error, resubscribe after a reconnect), `handleBrokerMessage`, `handleServerCoreMessage`, `runHub`, `MqttMgrInit` end to end, with a mock `MQTT.Client` | `server/vissv2server/mqttMgr/mqttMgr_init_test.go` |
+| `MqttMgrInit` wired to a model of the server core with separate request and response channels: concurrent requests all reach the core and are answered | `server/vissv2server/mqttMgr/mqttMgr_wiring_test.go` |
+| `transportDataSession` (the real one): a response or event handed to a manager is never read back by the core as a request, however busy the manager is; requests still reach the core | `server/vissv2server/vissv2server_transport_test.go` |
+
+#### Routing fields of forwarded requests
+
+| Helper | Test file |
+|--------|-----------|
+| `utils.WithRoutingInfo` / `AddRoutingForwardRequest`: a client cannot set `origin`, `RouterId`, `handle`, `gatingId` or `infoType`; gRPC string injection | `utils/managerhandlers_origin_test.go` |
+| the same through the server core: a protected signal is refused without a token when the client adds `origin` | `server/vissv2server/vissv2server_origin_test.go` |
+| `wsMgr::isKillSubscriptions`: the schema check is skipped by the action, not by text in the request | `server/vissv2server/wsMgr/wsMgr_killcheck_test.go` |
 
 #### wsMgr (beyond pure helpers covered in PR #122)
-
 | Helper                                  | Test file                                              |
 |-----------------------------------------|--------------------------------------------------------|
 | `getDcConfig`                            | `server/vissv2server/wsMgr/wsMgr_helpers_test.go`      |
@@ -167,6 +185,7 @@ corpus entry.
 |-----------------------------------------|--------------------------------------------------------|
 | `getSubscriptionId` (valid / missing / malformed JSON) | `server/vissv2server/grpcMgr/grpcMgr_helpers_test.go` |
 | `extractClientId` (valid + malformed parse) | `server/vissv2server/grpcMgr/grpcMgr_helpers_test.go` |
+| unsubscribe handling: `updateRoutingList`, `killSubscribeStream`, `getSubscribeRoutingData` / `resetGrpcRoutingData` guards, hub still serving after a subscribe + unsubscribe | `server/vissv2server/grpcMgr/grpcMgr_test.go` |
 
 #### Clients (`client/client-1.0/`)
 
@@ -176,6 +195,7 @@ corpus entry.
 | `csv_client`             | `client/client-1.0/csv_client/csv_client_test.go`                          |
 | `filetransfer_client`    | `client/client-1.0/filetransfer_client/filetransfer_client_helpers_test.go` |
 | `grpc_client`            | `client/client-1.0/grpc_client/grpc_client_test.go`                        |
+| `mqtt_client`            | `client/client-1.0/mqtt_client/mqtt_client_test.go`                        |
 | `testClient`             | `client/client-1.0/testClient/testClient_test.go`                          |
 
 Each covers the pure helpers in that client (path conversion, JSON
@@ -188,6 +208,10 @@ points are tested via runtest.sh integration.
 |---------------------------|-----------------------------------------------------------------|
 | `feeder-rl`                | `feeder/feeder-rl/feeder-rl_test.go` (PR #122)                  |
 | `feeder-template/feederv4` | `feeder/feeder-template/feederv4/feederv4_helpers_test.go`      |
+| `feeder-template/feederv4` (storage writers: sqlite, redis, memcache) | `feeder/feeder-template/feederv4/feederv4_storage_test.go` |
+| `feeder-template/feederv4` (`feederRegister`) | `feeder/feeder-template/feederv4/feederv4_register_test.go` |
+| `feeder-template/feederv4` (random simulation, `udsWriter`) | `feeder/feeder-template/feederv4/feederv4_testability_test.go` |
+| `feeder-template/feederv4` (`mongoSink`) | `feeder/feeder-template/feederv4/mongosink_test.go` |
 | `feeder-evic`              | `feeder/feeder-evic/evicFeeder_test.go`                         |
 | `feeder-evic/evicSim`      | `feeder/feeder-evic/evicSim/evicSim_test.go`                    |
 
@@ -197,27 +221,21 @@ Covers `fileExists`, `deSerializeUInt` (1/2/4-byte), `inFeederScope`,
 
 ## Functions that need code refactoring to be unit-testable
 
-Documented inline as `TODO(testing):` comments in each test file.
+Where applicable these are also documented as `TODO(testing):` comments in the test files.
 Listed here for visibility:
 
 | Function                                                       | Why not testable                                                                            | Refactor approach                                                                       |
 |----------------------------------------------------------------|---------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
-| `mqttMgr::createSubscribeClient`, `publishMessage` (post-`os.Exit` removal) | The fix is "absence of process exit". Helpers are wrapped around `MQTT.NewClient`.   | Extract a client-factory function so a mock `MQTT.Client` can be injected.              |
-| `vissv2server::issueServiceRequest` `dt[:5]` panic fix          | Inline in the main message-dispatch goroutine.                                              | Extract the SET-on-struct-Type branch into a function that takes (`requestMap`, `dt`).  |
-| `vissv2server::initiateFileTransfer` uid bounds check           | Embedded in channel-driven flow.                                                            | Extract `validateFileDescriptorUid([]byte) error`; call from `initiateFileTransfer`.    |
-| `feederv4::feederRegister`, `statestorageSet`                   | Coupled to live UDS / SQLite / Redis / memcache.                                            | Inject a storage interface; mock for tests.                                             |
-| `feederv4::udsReader`, `udsWriter`                              | Inline goroutine loops driving channels.                                                    | Extract per-message dispatch function; test it directly.                                |
-| `feederv4::simulateInput`, `selectRandomInput`, `getRandomVssfMapIndex` | Non-deterministic (`math/rand`).                                                       | Inject `*rand.Rand`; seed in tests.                                                     |
-| `feeder-evic::statestorageSet`, `udsReader/Writer`, `canDriverClient`, `serverSession`, `reDialer` | Coupled to live network / DB.                                                | Same shape: inject interfaces / extract per-message handlers.                           |
-| All client `initWebSocket*`, `controlClient`, `dataClient`, `downloadFile`, `uploadFile` | Need a running vissv2server.                                                  | Already integration-tested via runtest.sh.                                              |
-| `grpcMgr::GetRequest`, `SetRequest`, `UnsubscribeRequest`, `SubscribeRequest` | Streaming gRPC handlers; need a full gRPC fixture.                                   | Extract per-request body into a function taking plain Go values; test the helper.       |
-| `httpMgr` (entire package)                                     | Two functions, both giant goroutine loops with no extractable pure-function surface.        | Refactor `HttpMgrInit` to call out to a `handleRequest(msg) string` helper.             |
+| `feederv4::newMongoSink` | Connects to and pings a live MongoDB (`mongo.Connect`, `Ping`). The sink itself (`Write`, `writer`, `store`) works against a one method `updater` interface and is tested with a fake collection; the pure helpers `mongoTypedValue` and `mongoUpdateDoc` are tested. | Pass the connect function in, or cover it with an integration test against a MongoDB container (as CI does for the MQTT broker). |
+| `feeder-evic::statestorageSet`, `initUdsEndpoint`, `initVSSInterfaceMgr`, `writeCanDriverLoop`; `feeder-evic` and `evicSim`: `initVehicleInterfaceMgr`, `initCanDriverInput` / `initCanDriverOutput`, `canDriverClient`, `serverSession`, `reDialer` | Coupled to live network / DB, or long-running loops. `handleUdsConn` (extracted from `initUdsEndpoint`) can be driven with `net.Pipe` but has no test yet. | Same shape: inject interfaces, extract per-message handlers, extract a single-attempt helper from `reDialer`. |
+| `filetransfer_client::initWebSocket*`, `controlClient`, `dataClient`, `downloadFile`, `uploadFile` | Need a running vissv2server.                                         | Already integration-tested via runtest.sh.                                              |
+| `testClient` and `mqtt_client`: `mqttSubscribe`, `publishMessage` (`testClient` also `mqttTesterRun`) | Connect to a real broker (`MQTT_BROKER_ADDR`, default `127.0.0.1`) and call `os.Exit(1)` or `panic` on connect/subscribe/publish failure, which would kill the test process. | Return errors instead of exiting, and take an `MQTT.Client` (or factory) so a mock can be injected. Already integration-tested via runtest.sh with the local broker. |
 
 ## Subsystems with genuinely no .go code
 
 - `server/vissv2server/forest/` — VSS-tree binary data files only.
 - `server/transport_sec/` — TLS certs and `transportSec.json` config only.
-- `client/client-1.0/Javascript/`, `mqtt_client/`, `transport_sec/` — no Go code (JS client, certs, sample configs).
+- `client/client-1.0/Javascript/`, `transport_sec/` — no Go code (JS client, certs, sample configs).
 
 ## Note on `.gitignore`
 

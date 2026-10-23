@@ -13,7 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/covesa/vissr/utils"
 	MQTT "github.com/eclipse/paho.mqtt.golang"
@@ -23,9 +25,19 @@ var mqttChannel chan string
 
 var errorResponseMap = map[string]interface{}{}
 
+// NodeValue is the routing entry for one client request: the reply topic that
+// the response (and, for a subscribe request, all later events) is published
+// to, identified by the topicId that is carried in the RouterId of the
+// messages that the server core sends back.
 type NodeValue struct {
 	topicId int
 	topic   string
+	// subscriptionId is set on a "subscribe" entry when the subscribe response
+	// arrives. It lets the entry be released when the subscription is ended.
+	subscriptionId string
+	// unsubscribeTarget is, on an "unsubscribe" entry, the subscriptionId that
+	// the request asked to end.
+	unsubscribeTarget string
 }
 
 type Node struct {
@@ -42,7 +54,7 @@ var topicList TopicList
 
 // topicListMu guards topicList. pushTopic / getTopic / popTopic are
 // all called from the main MqttMgrInit select loop today, so the
-// mutex is largely defensive — but popTopic is documented as
+// mutex is largely defensive Ã¢â‚¬â€ but popTopic is documented as
 // "TODO: to be used at unsubscribe..." which suggests it will
 // eventually be invoked from another goroutine.
 var topicListMu sync.Mutex
@@ -66,20 +78,6 @@ func isValidVin(vin string) bool {
 	return true
 }
 
-func vissV2Receiver(transportMgrChan chan string, vissv2Channel chan string) {
-	//	defer dataConn.Close()
-	for {
-		/*		_, response, err := dataConn.ReadMessage() // receive message from server core
-				if err != nil {
-					utils.Error.Println("Datachannel read error:" + err.Error())
-					break
-				}*/
-		response := <-transportMgrChan
-		utils.Info.Printf("MQTT mgr: Response from server core:%s", string(response))
-		vissv2Channel <- string(response) // send message to hub
-	}
-}
-
 // TODO add conf file
 func getBrokerSocket(isSecure bool) string {
 	FVTAddr := os.Getenv("MQTT_BROKER_ADDR")
@@ -99,13 +97,33 @@ var publishHandler MQTT.MessageHandler = func(client MQTT.Client, msg MQTT.Messa
 	mqttChannel <- string(msg.Payload())
 }
 
+// newMqttClient creates the MQTT client. It is a variable so that tests can supply a client that does not need a broker.
+var newMqttClient = MQTT.NewClient
+
+// startupDelay is how long MqttMgrInit waits for the server and the feeder to start before it asks for the VIN.
+var startupDelay = 2 * time.Second
+
 func mqttSubscribe(brokerSocket string, topic string) MQTT.Client {
 	utils.Info.Printf("mqttSubscribe:Topic=%s", topic)
 	opts := MQTT.NewClientOptions().AddBroker(brokerSocket)
 	//    opts.SetClientID("VIN001")
 	opts.SetDefaultPublishHandler(publishHandler)
+	// The client library reconnects by itself when the connection to the broker is lost, but with a
+	// clean session, so the broker has forgotten the subscription and the manager would stay connected
+	// and receive nothing. The library calls this handler at the first connect and at every reconnect:
+	// the first call is skipped, because the subscription is made below, and the later ones subscribe again.
+	var connects atomic.Int32
+	opts.SetOnConnectHandler(func(client MQTT.Client) {
+		if connects.Add(1) == 1 {
+			return
+		}
+		utils.Info.Printf("mqttSubscribe: connection to the broker restored, subscribing again to Topic=%s", topic)
+		if token := client.Subscribe(topic, 0, nil); token.Wait() && token.Error() != nil {
+			utils.Error.Println("mqttSubscribe: subscribe after reconnect failed:", token.Error())
+		}
+	})
 
-	c := MQTT.NewClient(opts)
+	c := newMqttClient(opts)
 	if token := c.Connect(); token.Wait() && token.Error() != nil {
 		utils.Error.Println(token.Error())
 		return nil
@@ -159,6 +177,11 @@ func pushTopic(topic string, topicId int) {
 func popTopic(topicId int) {
 	topicListMu.Lock()
 	defer topicListMu.Unlock()
+	popTopicLocked(topicId)
+}
+
+// popTopicLocked is popTopic for callers that already hold topicListMu.
+func popTopicLocked(topicId int) {
 	if topicList.head == nil {
 		return
 	}
@@ -178,10 +201,101 @@ func popTopic(topicId int) {
 	}
 }
 
+// findTopicLocked returns the entry with the given topicId, or nil. The caller must hold topicListMu.
+func findTopicLocked(topicId int) *Node {
+	for n := topicList.head; n != nil; n = n.next {
+		if n.value.topicId == topicId {
+			return n
+		}
+	}
+	return nil
+}
+
+// registerRequest records the reply topic of a client request that is forwarded to the
+// server core, so that the response can be routed back to the client. For an unsubscribe
+// request the subscriptionId it names is remembered, see routeResponse.
+func registerRequest(topic string, topicId int, request string) {
+	pushTopic(topic, topicId)
+	var requestMap map[string]interface{}
+	if err := json.Unmarshal([]byte(request), &requestMap); err != nil {
+		return
+	}
+	if action, _ := requestMap["action"].(string); action == "unsubscribe" {
+		if target, ok := requestMap["subscriptionId"].(string); ok {
+			topicListMu.Lock()
+			if n := findTopicLocked(topicId); n != nil {
+				n.value.unsubscribeTarget = target
+			}
+			topicListMu.Unlock()
+		}
+	}
+}
+
+// routeResponse returns the reply topic for a message from the server core with the given
+// topicId, and releases the entry when the message is the last one for the request, so that
+// the list does not grow for as long as the server runs:
+//
+//	get, set, discover      one response: released with it
+//	any error response      the request is finished: released (an error on an unsubscribe
+//	                        leaves the subscription running, so only the unsubscribe entry goes)
+//	subscribe               kept for the events that follow; the subscriptionId of the
+//	                        response is recorded on the entry
+//	subscription            kept; an error event means the server has ended the subscription: released
+//	unsubscribe             released, together with the subscribe entry of the subscription it ended
+//
+// Messages that are not understood (not JSON, no string action, an action that is not listed,
+// e.g. a multi-event action of a service profile) never release anything: a leaked entry only
+// costs memory, but a released entry silently drops every later event of that request.
+// A subscription whose client goes away without unsubscribing is not released here.
+func routeResponse(topicId int, response string) string {
+	topicListMu.Lock()
+	defer topicListMu.Unlock()
+	node := findTopicLocked(topicId)
+	if node == nil {
+		return ""
+	}
+	topic := node.value.topic
+	var responseMap map[string]interface{}
+	if err := json.Unmarshal([]byte(response), &responseMap); err != nil {
+		return topic
+	}
+	action, ok := responseMap["action"].(string)
+	if !ok {
+		return topic
+	}
+	isError := responseMap["error"] != nil
+	switch action {
+	case "get", "set", "discover":
+		popTopicLocked(topicId)
+	case "subscribe":
+		if isError {
+			popTopicLocked(topicId)
+		} else if subscriptionId, ok := responseMap["subscriptionId"].(string); ok {
+			node.value.subscriptionId = subscriptionId
+		}
+	case "subscription":
+		if isError {
+			popTopicLocked(topicId)
+		}
+	case "unsubscribe":
+		target := node.value.unsubscribeTarget
+		popTopicLocked(topicId)
+		if !isError && target != "" {
+			for n := topicList.head; n != nil; n = n.next {
+				if n.value.subscriptionId == target {
+					popTopicLocked(n.value.topicId)
+					break
+				}
+			}
+		}
+	}
+	return topic
+}
+
 // publishMessage publishes payload on the given MQTT topic via the
 // supplied already-connected client. The original implementation
-// created a fresh MQTT.NewClient and connected on every call —
-// generating a TCP storm against the broker under load — and called
+// created a fresh MQTT.NewClient and connected on every call Ã¢â‚¬â€
+// generating a TCP storm against the broker under load Ã¢â‚¬â€ and called
 // os.Exit(1) on any Connect failure, killing the entire vissv2server
 // process for transient broker hiccups. Both problems are fixed by
 // reusing the long-lived subscription client (which can also publish).
@@ -216,7 +330,7 @@ func getVissV2TopicFromEnv() string {
 	return "/" + vin + "/Vehicle"
 }
 
-func getVissV2Topic(transportMgrChan chan string, mgrId int) string {
+func getVissV2Topic(requestChan chan string, responseChan chan string, mgrId int) string {
 	// Fast path: MQTT_VIN env var bypasses the channel round-trip (useful for
 	// local development where state storage has no VIN populated yet).
 	if topic := getVissV2TopicFromEnv(); topic != "" {
@@ -224,16 +338,10 @@ func getVissV2Topic(transportMgrChan chan string, mgrId int) string {
 	}
 
 	vinRequest := "{\"RouterId\":\"" + strconv.Itoa(mgrId) + `?0", "action":"get", "path":"Vehicle.VehicleIdentification.VIN", "requestId":"570415", "origin":"internal"}`
-	transportMgrChan <- vinRequest
+	requestChan <- vinRequest
 
-	// transportMgrChan is bidirectional (requests go server-ward, responses
-	// come back on the same channel via transportDataSession). We rely on the
-	// channel being unbuffered: if it were buffered our own send would sit in
-	// the buffer and we'd echo-read it before transportDataSession consumes it.
-	// vissv2server.initChannels explicitly keeps transportMgrChannel[2] unbuffered
-	// for exactly this reason.
 	select {
-	case response := <-transportMgrChan:
+	case response := <-responseChan:
 		vin := extractVin(string(response))
 		utils.Info.Printf("VIN=%s", vin)
 		if !isValidVin(vin) {
@@ -250,7 +358,7 @@ func getVissV2Topic(transportMgrChan chan string, mgrId int) string {
 // extractVin parses the VIN out of a server-core get response. The
 // original implementation used strings.Index(response, "value") + 8
 // and trusted that the literal sequence `value":"<VIN>"` appeared
-// exactly that way — any pretty-printed JSON or whitespace shifted
+// exactly that way Ã¢â‚¬â€ any pretty-printed JSON or whitespace shifted
 // the +8 offset onto the wrong characters, and a malformed response
 // caused either a wrong VIN or an OOB slice. Now we parse the
 // response as JSON and look for the value field at the well-known
@@ -285,7 +393,7 @@ func decomposeMqttPayload(mqttPayload string) (string, string) { // {"topic":"X"
 	utils.MapRequest(mqttPayload, &payloadMap)
 	// Bug fix: the original used json.Marshal on payloadMap["topic"],
 	// which returned `"X"` (with surrounding quotes), and that quoted
-	// string was then handed to MQTT.Publish as the topic name —
+	// string was then handed to MQTT.Publish as the topic name Ã¢â‚¬â€
 	// producing literal `"X"` topics on the wire. Worse, a missing
 	// "topic" key made Marshal return `"null"` (4 bytes), which
 	// silently passed the len(topic)==0 check at the call site.
@@ -305,22 +413,28 @@ func decomposeMqttPayload(mqttPayload string) (string, string) { // {"topic":"X"
 	return topic, string(payload)
 }
 
-func AddRoutingInfoAndForward(reqMessage string, mgrId int, clientId int, transportMgrChan chan string) {
-	newPrefix := "{ \"RouterId\":\"" + strconv.Itoa(mgrId) + "?" + strconv.Itoa(clientId) + "\", "
-	request := strings.Replace(reqMessage, "{", newPrefix, 1)
-	transportMgrChan <- request
+// addRoutingInfo returns the request with the routing fields that the manager decides (RouterId and
+// origin) set, and every such field the client put in the request removed, see utils.WithRoutingInfo.
+// It returns false if the request is not a JSON object.
+func addRoutingInfo(reqMessage string, mgrId int, clientId int) (string, bool) {
+	return utils.WithRoutingInfo(reqMessage, mgrId, clientId)
 }
 
-func MqttMgrInit(mgrId int, transportMgrChan chan string) {
+func AddRoutingInfoAndForward(reqMessage string, mgrId int, clientId int, requestChan chan string) {
+	if request, ok := addRoutingInfo(reqMessage, mgrId, clientId); ok {
+		requestChan <- request
+	}
+}
+
+func MqttMgrInit(mgrId int, requestChan chan string, responseChan chan string) {
 	mqttChannel = make(chan string)
-	vissv2Channel := make(chan string)
 
 	brokerSocket := getBrokerSocket(false)
-	// wait for 2 seconds to allow the server and feeder to start
-	time.Sleep(2 * time.Second)
-	topic := getVissV2Topic(transportMgrChan, mgrId)
+	// wait to allow the server and feeder to start
+	time.Sleep(startupDelay)
+	topic := getVissV2Topic(requestChan, responseChan, mgrId)
 	if topic == "" {
-		// Refused by isValidVin in getVissV2Topic — don't even try.
+		// Refused by isValidVin in getVissV2Topic Ã¢â‚¬â€ don't even try.
 		utils.Error.Printf("MqttMgrInit: refusing to start; could not derive a valid VISS v2 topic")
 		return
 	}
@@ -329,55 +443,99 @@ func MqttMgrInit(mgrId int, transportMgrChan chan string) {
 		utils.Error.Printf("MqttMgrInit: subscribe failed for topic=%s; manager not started", topic)
 		return
 	}
-	topicId := 0
 	topicList.nodes = 0
 
 	utils.JsonSchemaInit()
 
-	go vissV2Receiver(transportMgrChan, vissv2Channel) //message reception from server core
-
 	utils.Info.Println("**** MQTT manager hub entering server loop... ****")
+	runHub(mgrId, requestChan, responseChan, mqttChannel, serverSubscription, nil)
+}
 
-	// The original loop had a `default: time.Sleep(25 * time.Millisecond)`
+// isValidReplyTopic reports whether topic can be published to: it is chosen by the client, and a topic
+// name must not contain the wildcards + and # (a broker closes the connection of a client that
+// publishes to one, which here is the manager's only connection, for all clients), nor the null
+// character, must be valid UTF-8, and is at most 65535 bytes (MQTT 3.1.1, section 4.7 and 1.5.3).
+func isValidReplyTopic(topic string) bool {
+	if topic == "" || len(topic) > 65535 || !utf8.ValidString(topic) {
+		return false
+	}
+	return !strings.ContainsAny(topic, "+#\x00")
+}
+
+// handleBrokerMessage handles one message that the broker delivered on the server's topic: a client
+// request {"topic":"<reply topic>","request":{...}}. A request that is not valid is answered with an
+// error response on the reply topic, otherwise it is registered and forwarded to the server core. It
+// returns the topicId to use for the next request. The request is handed to forward, after it has been registered.
+func handleBrokerMessage(mqttPayload string, mgrId int, topicId int, forward func(request string), client MQTT.Client) int {
+	topic, payload := decomposeMqttPayload(mqttPayload)
+	if len(topic) == 0 {
+		utils.Error.Printf("MQTT: Message from broker is corrupt:%s\nNot possible to respond to client", mqttPayload)
+		return topicId
+	}
+	if !isValidReplyTopic(topic) {
+		utils.Error.Printf("MQTT: dropping request with an invalid reply topic %q", topic)
+		return topicId
+	}
+	utils.Info.Printf("MQTT mgr hub: Message from broker:Topic=%s, Payload=%s", topic, payload)
+	validationError := utils.JsonSchemaValidate(payload)
+	if len(validationError) > 0 {
+		// Bug fix: the original code published the error
+		// response back to the client AND THEN fell through
+		// to pushTopic + AddRoutingInfoAndForward, so the
+		// schema-invalid payload was still routed inward to
+		// the server core. Returning here short-circuits that
+		// fall-through.
+		var requestMap map[string]interface{}
+		utils.MapRequest(payload, &requestMap)
+		utils.SetErrorResponse(requestMap, errorResponseMap, 0, validationError) //bad_request
+		publishMessage(client, topic, utils.FinalizeMessage(errorResponseMap))
+		return topicId
+	}
+	request, ok := addRoutingInfo(payload, mgrId, topicId)
+	if !ok {
+		utils.Error.Printf("MQTT: dropping a request that is not a JSON object: %.200s", payload)
+		return topicId
+	}
+	registerRequest(topic, topicId, payload)
+	forward(request)
+	return topicId + 1
+}
+
+// handleServerCoreMessage handles one message from the server core (a response or a subscription
+// event): the router id is removed and the message is published on the reply topic of the request.
+func handleServerCoreMessage(vissv2Message string, client MQTT.Client) {
+	utils.Info.Printf("MQTT hub: Message from VISSv2 server:%s", vissv2Message)
+	// link routerId to topic, remove routerId from message, create mqtt message, send message to mqtt transport
+	payload, topicHandle := utils.RemoveInternalData(vissv2Message)
+	publishMessage(client, routeResponse(topicHandle, payload), payload)
+}
+
+// runHub is the server loop of the manager: it takes the messages from the broker (mqttCh) and the responses
+// and events from the server core (responseChan) one at a time, and sends the requests to the core on
+// requestChan. It returns when stop is closed; a nil stop never fires, which is what MqttMgrInit uses.
+func runHub(mgrId int, requestChan chan string, responseChan chan string, mqttCh chan string, client MQTT.Client, stop <-chan struct{}) {
+	forward := func(request string) {
+		select {
+		case requestChan <- request:
+		case <-stop:
+		}
+	}
+	topicId := 0
+	// The original loop had a "default: time.Sleep(25 * time.Millisecond)"
 	// arm that added 25ms of latency per message and woke this
-	// goroutine 40 times per second forever. It's gone now: a select
+	// goroutine 40 times per second forever. It is gone now: a select
 	// with only blocking channel cases parks the goroutine until
 	// something actually arrives. The Disconnect(250) call that lived
 	// after this loop was also unreachable (the for has no break) and
 	// has been removed.
 	for {
 		select {
-
-		case mqttPayload := <-mqttChannel:
-			topic, payload := decomposeMqttPayload(mqttPayload)
-			if len(topic) == 0 {
-				utils.Error.Printf("MQTT: Message from broker is corrupt:%s\nNot possible to respond to client", mqttPayload)
-				continue
-			}
-			utils.Info.Printf("MQTT mgr hub: Message from broker:Topic=%s, Payload=%s", topic, payload)
-			validationError := utils.JsonSchemaValidate(payload)
-			if len(validationError) > 0 {
-				// Bug fix: the original code published the error
-				// response back to the client AND THEN fell through
-				// to pushTopic + AddRoutingInfoAndForward, so the
-				// schema-invalid payload was still routed inward to
-				// the server core. `continue` short-circuits that
-				// fall-through.
-				var requestMap map[string]interface{}
-				utils.MapRequest(payload, &requestMap)
-				utils.SetErrorResponse(requestMap, errorResponseMap, 0, validationError) //bad_request
-				publishMessage(serverSubscription, topic, utils.FinalizeMessage(errorResponseMap))
-				continue
-			}
-			pushTopic(topic, topicId)
-			AddRoutingInfoAndForward(payload, mgrId, topicId, transportMgrChan)
-			topicId++
-
-		case vissv2Message := <-vissv2Channel:
-			utils.Info.Printf("MQTT hub: Message from VISSv2 server:%s", vissv2Message)
-			// link routerId to topic, remove routerId from message, create mqtt message, send message to mqtt transport
-			payload, topicHandle := utils.RemoveInternalData(string(vissv2Message))
-			publishMessage(serverSubscription, getTopic(topicHandle), payload)
+		case mqttPayload := <-mqttCh:
+			topicId = handleBrokerMessage(mqttPayload, mgrId, topicId, forward, client)
+		case vissv2Message := <-responseChan:
+			handleServerCoreMessage(vissv2Message, client)
+		case <-stop:
+			return
 		}
 	}
 }

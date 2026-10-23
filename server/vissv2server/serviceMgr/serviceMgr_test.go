@@ -6,6 +6,7 @@ package serviceMgr
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net"
 	"os"
 	"runtime"
@@ -990,6 +991,10 @@ func TestTickerAllocate_HappyPath(t *testing.T) {
 
 func TestTickerAllocate_NoFreeSlots(t *testing.T) {
 	resetTickerGlobals()
+	// The table is filled with ids 1..MAXTICKERS, none of which has a ticker. It must be emptied again,
+	// or a later test that uses one of those ids (TestActivateDeactivateInterval_NoGoroutineLeak uses 42)
+	// finds a slot without a ticker and panics on a nil ticker, depending on the order the tests run in.
+	defer resetTickerGlobals()
 	for i := 0; i < MAXTICKERS; i++ {
 		tickerIndexList[i] = i + 1
 	}
@@ -1617,15 +1622,60 @@ func TestEvaluateChangeFilter_NumberEqNoDiff(t *testing.T) {
 }
 
 func TestEvaluateChangeFilter_BoolNe(t *testing.T) {
-	// diff = "false" is boolean: IsBoolean("false") => true
+	// diff = "false" is boolean, but is not the VISS-conformant "0" that
+	// compareValues' bool branch requires -- so this must return false.
 	param := `{"logic-op":"ne","diff":"false"}`
 	dp := `{"value":"true","ts":"2026-01-01T00:00:00Z"}`
 	ok, _ := evaluateChangeFilter(param, "false", "true", dp)
-	// compareValues("ne", "false", "true", "false", "bool")
-	// diff is not "0" so returns false for bool
-	// evaluateChangeFilter with IsBoolean(diff) => datatype="bool"
-	// but diff="false" != "0" => compareValues returns false
-	_ = ok // just ensure no panic
+	if ok {
+		t.Errorf("diff=\"false\" (not \"0\") on a bool signal should return false; got true")
+	}
+}
+
+// TestEvaluateChangeFilter_BoolGtWithConformantDiff is a regression test
+// for the bug where a VISS-conformant boolean change-filter subscription
+// (e.g. {"logic-op":"gt","diff":"0"} on Vehicle.Cabin.Door.Row1.
+// DriverSide.IsOpen, per CORE's Change Filter Operation) never fired.
+// evaluateChangeFilter used to decide "bool" vs "number" datatype by
+// calling utils.IsBoolean on the filter's diff parameter rather than on
+// the signal's own value; since a boolean signal's diff is
+// conventionally the numeric-looking "0" (compareValues' bool branch
+// itself requires diff=="0"), IsBoolean("0") was always false, so
+// datatype was always forced to "number", and compareValues then failed
+// to strconv.ParseFloat("true"/"false", ...) and silently returned
+// false for every logic-op, regardless of whether the value actually
+// changed. These four cases mirror the exact filters from the bug
+// report (gt, ne, lt) plus eq, all with the spec-conformant diff="0".
+func TestEvaluateChangeFilter_BoolWithConformantDiff(t *testing.T) {
+	dp := `{"value":"true","ts":"2026-01-01T00:00:00Z"}`
+	cases := []struct {
+		name        string
+		logicOp     string
+		latestValue string
+		currentValue string
+		want        bool
+	}{
+		{"gt: false->true is a rising transition", "gt", "false", "true", true},
+		{"gt: true->false is not a rising transition", "gt", "true", "false", false},
+		{"gt: no change", "gt", "true", "true", false},
+		{"lt: true->false is a falling transition", "lt", "true", "false", true},
+		{"lt: false->true is not a falling transition", "lt", "false", "true", false},
+		{"ne: false->true is any change", "ne", "false", "true", true},
+		{"ne: true->false is any change", "ne", "true", "false", true},
+		{"ne: no change", "ne", "true", "true", false},
+		{"eq: no change", "eq", "true", "true", true},
+		{"eq: changed", "eq", "false", "true", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			param := `{"logic-op":"` + tc.logicOp + `","diff":"0"}`
+			ok, _ := evaluateChangeFilter(param, tc.latestValue, tc.currentValue, dp)
+			if ok != tc.want {
+				t.Errorf("evaluateChangeFilter(%s, latest=%s, current=%s) = %v; want %v",
+					param, tc.latestValue, tc.currentValue, ok, tc.want)
+			}
+		})
+	}
 }
 
 func TestEvaluateChangeFilter_BadJSON(t *testing.T) {
@@ -2613,6 +2663,10 @@ func TestHandleServiceSubscribe_ChangeFilterSendsToFeeder(t *testing.T) {
 
 func TestHandleServiceSubscribe_GatingIdSet(t *testing.T) {
 	resetErrorResponseMap()
+	// The subscription is timebased, so a real ticker (and its goroutine) is started for subscription id 1.
+	// Stop it when the test ends: a ticker left running makes the goroutine count of
+	// TestActivateDeactivateInterval_NoGoroutineLeak one too high when that test runs after this one.
+	t.Cleanup(func() { deactivateInterval(1) })
 	dataChan := make(chan map[string]interface{}, 1)
 	subscriptionChan := make(chan int, 4)
 	toFeederChan := make(chan string, 1)
@@ -4917,6 +4971,68 @@ func TestGetMetadataDomainDp_KnownDomains(t *testing.T) {
 		if !strings.Contains(result, "value") {
 			t.Errorf("domain=%q: expected JSON with value key; got %q", tc.domain, result)
 		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// feederReader — concatenated-message regression test
+//
+// Regression test for the bug where a VISSv3.2 "Multiple Data Update" (set)
+// request with two paths caused serviceMgr's feederFrontend to issue two
+// back-to-back Conn.Write calls to a feeder's UDS connection, one per "set"
+// message, with no delimiter between them. Because UDS SOCK_STREAM sockets
+// (like TCP) don't preserve message boundaries, the two writes could
+// coalesce into a single Read() as `{"action":...}{"action":...}` -- which
+// the old feederReader passed whole, as one opaque string, onto
+// feederChannelList[i].Channel, corrupting downstream JSON parsing.
+//
+// The fix appends '\n' after every message written to a feeder (see
+// feederFrontend, handleToFeederMessage, configureDefault) and switches
+// feederReader to a bufio.Scanner (ScanLines), which reassembles partial
+// reads and splits coalesced ones on the delimiter. This test writes two
+// newline-terminated "set" messages in a single Write() call -- simulating
+// the OS coalescing two separate writer calls into one read -- and asserts
+// feederReader emits them as two distinct, individually-parseable messages
+// on the channel.
+// --------------------------------------------------------------------------
+
+func TestFeederReader_ConcatenatedMessagesSplitCorrectly(t *testing.T) {
+	resetFeederGlobals()
+	server, client := net.Pipe()
+	defer client.Close()
+
+	feederChannelList[0].Channel = make(chan string, 4)
+	go feederReader(server, "test-feeder", 0)
+
+	msg1 := `{"action": "set", "data": {"path":"Vehicle.TripMeterReading", "dp":{"value":"true", "ts":"2026-09-07T11:51:16.158Z"}}}`
+	msg2 := `{"action": "set", "data": {"path":"Vehicle.ADAS.CruiseControl.IsActive", "dp":{"value":"true", "ts":"2026-09-07T11:51:16.158Z"}}}`
+	if _, err := client.Write([]byte(msg1 + "\n" + msg2 + "\n")); err != nil {
+		t.Fatalf("client.Write failed: %v", err)
+	}
+
+	var got []string
+	for i := 0; i < 2; i++ {
+		select {
+		case m := <-feederChannelList[0].Channel:
+			got = append(got, m)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for message #%d; got so far: %v", i+1, got)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d messages; want 2: %v", len(got), got)
+	}
+	for _, m := range got {
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(m), &decoded); err != nil {
+			t.Errorf("message %q failed to unmarshal as standalone JSON: %v", m, err)
+		}
+	}
+	if got[0] != msg1 {
+		t.Errorf("first message = %q; want %q", got[0], msg1)
+	}
+	if got[1] != msg2 {
+		t.Errorf("second message = %q; want %q", got[1], msg2)
 	}
 }
 

@@ -13,6 +13,7 @@
 package serviceMgr
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"github.com/apache/iotdb-client-go/client"
@@ -84,6 +85,11 @@ type FeederChannelElem struct {
 }
 var feederChannelList []FeederChannelElem
 const MAXFEEDERS = 5
+
+// maxFeederMessageBytes caps how large a single newline-delimited message
+// to/from a feeder may grow to before feederReader gives up buffering it,
+// mirroring the feeder-side udsReader's MaxReadBytes cap.
+const maxFeederMessageBytes = 1 << 20 // 1 MiB
 
 type FeederRegElem struct {
 	Name string
@@ -224,7 +230,9 @@ func deactivateInterval(subscriptionId int) {
 		utils.Error.Printf("deactivateInterval: No ticker found for subscriptionId=%d", subscriptionId)
 		return
 	}
-	subscriptionTicker[index].Stop()
+	if subscriptionTicker[index] != nil { // a slot that was allocated but never got its ticker has none
+		subscriptionTicker[index].Stop()
+	}
 	if tickerDone[index] != nil {
 		close(tickerDone[index])
 		tickerDone[index] = nil
@@ -370,8 +378,20 @@ func evaluateChangeFilter(opValue string, latestValue string, currentValue strin
 		utils.Error.Printf("evaluateChangeFilter: Unmarshal error=%s", err)
 		return false, ""
 	}
+	// Bug fix: the datatype used to select compareValues' bool-vs-number
+	// branch must be derived from the signal's own value (latestValue/
+	// currentValue), not from the filter's "diff" parameter. Per VISS
+	// CORE's Change Filter Operation, a boolean signal's "diff" is
+	// conventionally the numeric-looking string "0" (compareValues'
+	// "bool" branch itself requires diff=="0"), so utils.IsBoolean(diff)
+	// is always false for a real boolean-signal subscription -- which
+	// previously forced datatype to "number" and made compareValues try
+	// strconv.ParseFloat("true"/"false", ...), which always fails and
+	// silently returns false. That made every "change" filter subscription
+	// on a boolean-valued path (e.g. Vehicle.Cabin.Door.Row1.DriverSide.
+	// IsOpen) never fire, regardless of logic-op.
 	datatype := "number"
-	if utils.IsBoolean(changeFilter.Diff) {
+	if utils.IsBoolean(currentValue) || utils.IsBoolean(latestValue) {
 		datatype = "bool"
 	}
 	val1 := compareValues(changeFilter.LogicOp, latestValue, currentValue, changeFilter.Diff, datatype)
@@ -1005,8 +1025,15 @@ func configureDefault(udsConn net.Conn) {
 			utils.Error.Printf("configureDefault: Failed to read default configuration from %s with error = %s", defaultFile, err)
 			return
 		}
-		defaultMessage := `{"action": "update", "defaultList": ` + string(data) + "}"
-		_, err = udsConn.Write([]byte(defaultMessage))
+		// Raw newlines in a pretty-printed defaultListX.json are pure JSON
+		// whitespace (a literal, unescaped newline inside a JSON string
+		// value would make the file invalid JSON to begin with), so it's
+		// safe to fold them out here -- necessary because the message is
+		// itself terminated with '\n' as the framing delimiter to the
+		// feeder (see udsWriter/udsReader for why a delimiter is needed).
+		fileContent := strings.ReplaceAll(strings.ReplaceAll(string(data), "\r\n", " "), "\n", " ")
+		defaultMessage := `{"action": "update", "defaultList": ` + fileContent + "}"
+		_, err = udsConn.Write([]byte(defaultMessage + "\n"))
 		if err != nil {
 			utils.Error.Printf("configureDefault:Feeder write failed, err = %s", err)
 		}
@@ -1257,7 +1284,7 @@ func feederFrontend(toFeeder chan string, fromFeederRorC chan string, fromFeeder
 					}
 					for i := 0; i < len(feederRegList); i++ {
 						if feederRegList[i].Conn != nil && feederRegList[i].InfoType == infoType {
-							_, err := feederRegList[i].Conn.Write([]byte(message))
+							_, err := feederRegList[i].Conn.Write([]byte(message + "\n"))
 							if err != nil {
 								utils.Error.Printf("feederFrontend:write to feeder %s failed, err = %s", feederRegList[i].Name, err)
 							}
@@ -1369,7 +1396,7 @@ func handleToFeederMessage(message string, fromFeederCl chan string, feederNotif
 	}
 	for i := 0; i < len(feederRegList); i++ {
 		if feederRegList[i].Conn != nil && feederRegList[i].InfoType == infoType {
-			_, err := feederRegList[i].Conn.Write([]byte(message))
+			_, err := feederRegList[i].Conn.Write([]byte(message + "\n"))
 			if err != nil {
 				utils.Error.Printf("feederFrontend:write to feeder %s failed, err=%v", feederRegList[i].Name, err)
 			}
@@ -1541,16 +1568,26 @@ func feederReaderMgr(fromFeeders chan string) {
 	}
 }
 
+// feederReader reads newline-delimited JSON messages sent by the feeder
+// over its UDS connection. UDS SOCK_STREAM sockets, like TCP, do not
+// preserve message boundaries: two back-to-back writes from the feeder
+// could otherwise arrive concatenated in a single Read(), with no
+// separator between them. The feeder's udsWriter terminates every message
+// with '\n', and bufio.Scanner's default split function (ScanLines)
+// reassembles partial reads and splits any coalesced ones on that
+// delimiter, so each Scan() yields exactly one message.
 func feederReader(udsConn net.Conn, feederName string, feederChannelIndex int) {
-	buf := make([]byte, 512)
-	for {
-		nr, err := udsConn.Read(buf)
-		if err != nil {
-			utils.Error.Printf("feederReader:Read from %s failed, err = %s", feederName, err)
-			break
-		} else {
-			feederChannelList[feederChannelIndex].Channel <- string(buf[:nr])
+	scanner := bufio.NewScanner(udsConn)
+	scanner.Buffer(make([]byte, 0, 4096), maxFeederMessageBytes)
+	for scanner.Scan() {
+		message := scanner.Text()
+		if len(message) == 0 {
+			continue
 		}
+		feederChannelList[feederChannelIndex].Channel <- message
+	}
+	if err := scanner.Err(); err != nil {
+		utils.Error.Printf("feederReader:Read from %s failed, err = %s", feederName, err)
 	}
 }
 
@@ -1576,18 +1613,74 @@ func buildServiceResponseMap(requestMap map[string]interface{}) map[string]inter
 // service_unavailable response back on dataChan. Extracted from
 // ServiceMgrInit's dataChan switch in PR #129.
 func handleServiceSet(requestMap map[string]interface{}, responseMap map[string]interface{}, dataChan chan map[string]interface{}) {
+	path, ok := requestMap["path"].(string)
+	if !ok {
+		utils.SetErrorResponse(requestMap, errorResponseMap, 1, "missing/invalid path") //invalid_data
+		dataChan <- errorResponseMap
+		return
+	}
 	var ts string
-	switch requestMap["value"].(type) {
+	switch value := requestMap["value"].(type) {
 	case string:
-		ts = setVehicleData(requestMap["path"].(string), requestMap["value"].(string))
+		ts = setVehicleData(path, value)
 	case map[string]interface{}:
-		data, _ := json.Marshal(requestMap["value"])
-		ts = setVehicleData(requestMap["path"].(string), string(data))
+		data, _ := json.Marshal(value)
+		ts = setVehicleData(path, string(data))
 	}
 	if len(ts) == 0 {
 		utils.SetErrorResponse(requestMap, errorResponseMap, 7, "") //service_unavailable
 		dataChan <- errorResponseMap
 		return
+	}
+	responseMap["ts"] = ts
+	dataChan <- responseMap
+}
+
+// handleServiceMultiSet processes a VISSv3.2 Multiple Data Update
+// request (CORE section 5.2.2): requestMap["data"] is an array of
+// {"path","value"} objects - already resolved to fully-qualified,
+// dot-delimited leaf paths by handleMultiSetRequest in the core
+// server - and each is written via the state-storage backend
+// (setVehicleData), exactly as handleServiceSet does for a single
+// path/value pair. On the first backend failure, a single
+// service_unavailable error response is returned; there is no partial
+// application semantics defined by CORE for this case, so it stops at
+// the first error.
+func handleServiceMultiSet(requestMap map[string]interface{}, responseMap map[string]interface{}, dataChan chan map[string]interface{}) {
+	dataArray, ok := requestMap["data"].([]interface{})
+	if !ok || len(dataArray) == 0 {
+		utils.SetErrorResponse(requestMap, errorResponseMap, 1, "") //invalid_data
+		dataChan <- errorResponseMap
+		return
+	}
+	var ts string
+	for i := 0; i < len(dataArray); i++ {
+		elem, ok := dataArray[i].(map[string]interface{})
+		if !ok {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 1, "") //invalid_data
+			dataChan <- errorResponseMap
+			return
+		}
+		path, ok := elem["path"].(string)
+		if !ok {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 1, "") //invalid_data
+			dataChan <- errorResponseMap
+			return
+		}
+		switch value := elem["value"].(type) {
+		case string:
+			ts = setVehicleData(path, value)
+		case map[string]interface{}:
+			data, _ := json.Marshal(value)
+			ts = setVehicleData(path, string(data))
+		default:
+			ts = ""
+		}
+		if len(ts) == 0 {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 7, "") //service_unavailable
+			dataChan <- errorResponseMap
+			return
+		}
 	}
 	responseMap["ts"] = ts
 	dataChan <- responseMap
@@ -1599,7 +1692,13 @@ func handleServiceSet(requestMap map[string]interface{}, responseMap map[string]
 // ServiceMgrInit in PR #129. Error paths emit invalid_data or
 // bad_request as appropriate.
 func handleServiceGet(requestMap map[string]interface{}, responseMap map[string]interface{}, dataChan chan map[string]interface{}) {
-	pathArray := unpackPaths(requestMap["path"].(string))
+	path, ok := requestMap["path"].(string)
+	if !ok {
+		utils.SetErrorResponse(requestMap, errorResponseMap, 1, "missing/invalid path") //invalid_data
+		dataChan <- errorResponseMap
+		return
+	}
+	pathArray := unpackPaths(path)
 	if pathArray == nil {
 		utils.Error.Printf("Unmarshal of path array failed.")
 		utils.SetErrorResponse(requestMap, errorResponseMap, 1, "") //invalid_data
@@ -1651,8 +1750,15 @@ func handleServiceSubscribe(
 ) ([]SubscriptionState, int) {
 	var subscriptionState SubscriptionState
 	subscriptionState.SubscriptionId = subscriptionId
-	subscriptionState.RouterId = requestMap["RouterId"].(string)
-	subscriptionState.Path = unpackPaths(requestMap["path"].(string))
+	routerId, routerIdOk := requestMap["RouterId"].(string)
+	pathStr, pathOk := requestMap["path"].(string)
+	if !routerIdOk || !pathOk {
+		utils.SetErrorResponse(requestMap, errorResponseMap, 0, "") //bad_request
+		dataChan <- errorResponseMap
+		return subscriptionList, subscriptionId
+	}
+	subscriptionState.RouterId = routerId
+	subscriptionState.Path = unpackPaths(pathStr)
 	if len(subscriptionState.Path) == 0 { // Fix bug 2: unpackPaths returned nil for malformed JSON
 		utils.SetErrorResponse(requestMap, errorResponseMap, 0, "") //bad_request
 		dataChan <- errorResponseMap
@@ -1670,7 +1776,13 @@ func handleServiceSubscribe(
 		return subscriptionList, subscriptionId // Fix bug 1: return instead of falling through
 	}
 	if requestMap["gatingId"] != nil {
-		subscriptionState.GatingId = requestMap["gatingId"].(string)
+		gatingId, ok := requestMap["gatingId"].(string)
+		if !ok {
+			utils.SetErrorResponse(requestMap, errorResponseMap, 1, "invalid gatingId") //invalid_data
+			dataChan <- errorResponseMap
+			return subscriptionList, subscriptionId
+		}
+		subscriptionState.GatingId = gatingId
 	}
 	subscriptionState.LatestDataPoint = getVehicleData(subscriptionState.Path[0])
 	subscriptionList = append(subscriptionList, subscriptionState)
@@ -1714,13 +1826,18 @@ func handleServiceUnsubscribe(requestMap map[string]interface{}, responseMap map
 // handleInternalKillSubscriptions processes the
 // "internal-killsubscriptions" action: scans the subscription list and
 // removes every entry whose RouterId matches the request. No response
-// is emitted — this is an internal cleanup message. Returns the
+// is emitted - this is an internal cleanup message. Returns the
 // updated subscriptionList. Extracted from ServiceMgrInit in PR #129.
 func handleInternalKillSubscriptions(requestMap map[string]interface{}, subscriptionList []SubscriptionState) []SubscriptionState {
+	routerId, ok := requestMap["RouterId"].(string)
+	if !ok {
+		utils.Error.Printf("internal-killsubscriptions: missing/invalid RouterId, ignored")
+		return subscriptionList
+	}
 	isRemoved := true
 	for isRemoved == true {
-		isRemoved, subscriptionList = scanAndRemoveListItem(subscriptionList, requestMap["RouterId"].(string))
-		utils.Info.Printf("internal-killsubscriptions: RouterId = %s", requestMap["RouterId"].(string))
+		isRemoved, subscriptionList = scanAndRemoveListItem(subscriptionList, routerId)
+		utils.Info.Printf("internal-killsubscriptions: RouterId = %s", routerId)
 	}
 	return subscriptionList
 }
@@ -1733,7 +1850,12 @@ func handleInternalKillSubscriptions(requestMap map[string]interface{}, subscrip
 // updated subscriptionList. If the gatingId is not found, the list is
 // returned unchanged. Extracted from ServiceMgrInit in PR #129.
 func handleInternalCancelSubscription(requestMap map[string]interface{}, dataChan chan map[string]interface{}, subscriptionList []SubscriptionState) []SubscriptionState {
-	routerId, subscriptionId := getSubscriptionData(subscriptionList, requestMap["gatingId"].(string))
+	gatingId, ok := requestMap["gatingId"].(string)
+	if !ok {
+		utils.Error.Printf("internal-cancelsubscription: missing/invalid gatingId, ignored")
+		return subscriptionList
+	}
+	routerId, subscriptionId := getSubscriptionData(subscriptionList, gatingId)
 	if routerId != "" {
 		requestMap["RouterId"] = routerId
 		requestMap["action"] = "subscription"
@@ -1758,7 +1880,7 @@ func handleUnknownAction(requestMap map[string]interface{}, dataChan chan map[st
 // handleIntervalNotification handles a fire on subscriptionChan (an
 // interval-based subscription's timer ticked). Looks up the
 // subscription, builds a notification event with the current data
-// pack, and pushes it to backendChan with a non-blocking select — the
+// pack, and pushes it to backendChan with a non-blocking select - the
 // original arm drops the event rather than block when backendChan is
 // full. Extracted from ServiceMgrInit in follow-up PR B to #129.
 func handleIntervalNotification(subscriptionId int, subscriptionList []SubscriptionState, backendChan chan map[string]interface{}) {
@@ -2030,7 +2152,15 @@ func ServiceMgrInit(mgrId int, serviceMgrChan chan map[string]interface{}, state
 			switch requestMap["action"] {
 			case "invoke": // invokeVehicleService(...
 			case "set":
-				handleServiceSet(requestMap, responseMap, dataChan)
+				if _, isMultiSet := requestMap["data"]; isMultiSet {
+					// VISSv3.2 Multiple Data Update (CORE section 5.2.2):
+					// the core server resolves "data" to an array of
+					// {"path","value"} objects (see handleMultiSetRequest)
+					// instead of the single-signal "path"/"value" pair.
+					handleServiceMultiSet(requestMap, responseMap, dataChan)
+				} else {
+					handleServiceSet(requestMap, responseMap, dataChan)
+				}
 			case "get":
 				handleServiceGet(requestMap, responseMap, dataChan)
 			case "subscribe":

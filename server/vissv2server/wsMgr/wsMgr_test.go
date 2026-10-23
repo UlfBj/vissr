@@ -128,7 +128,7 @@ func TestRemoveRoutingForwardResponse_SubscriptionForwardedToBackend(t *testing.
 
 	done := make(chan struct{})
 	go func() {
-		RemoveRoutingForwardResponse(resp, nil)
+		RemoveRoutingForwardResponse(resp)
 		close(done)
 	}()
 	select {
@@ -152,7 +152,7 @@ func TestRemoveRoutingForwardResponse_SubscriptionDroppedWhenBackendFull(t *test
 	resp := `{"action":"subscription","subscriptionId":"sub-drop","RouterId":"0?1"}`
 	// Must not panic or block. Call synchronously (no goroutine needed
 	// because the select has a default).
-	RemoveRoutingForwardResponse(resp, nil)
+	RemoveRoutingForwardResponse(resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +201,25 @@ func TestCheckCompressionRequest_InsertsForGetMultiPath(t *testing.T) {
 	}
 	if dataCompressionCache[idx].ResponseHandling != 2 {
 		t.Fatalf("responseHandling = %d; want 2 (get+multiPath)", dataCompressionCache[idx].ResponseHandling)
+	}
+}
+
+// TestCheckCompressionRequest_InsertsForMultiGetDataArray: a VISSv3.2
+// Multiple Tree Addressability Read request (CORE section 5.1.1.2) uses
+// a top-level "data" array instead of the pre-existing "paths" filter
+// variant, but must be treated the same way for compression purposes
+// (responseHandling==2, not path-compressed as if single-path).
+func TestCheckCompressionRequest_InsertsForMultiGetDataArray(t *testing.T) {
+	initDcCache()
+	defer initDcCache()
+	msg := `{"action":"get","data":["Vehicle.Speed","Vehicle.Cabin.Door.Row1.DriverSide.IsOpen"],"dc":"2+1","requestId":"201"}`
+	checkCompressionRequest(msg)
+	idx := getDcCacheIndex("201")
+	if idx == -1 {
+		t.Fatalf("expected cache entry after checkCompressionRequest with dc field")
+	}
+	if dataCompressionCache[idx].ResponseHandling != 2 {
+		t.Fatalf("responseHandling = %d; want 2 (get+multi-signal data array)", dataCompressionCache[idx].ResponseHandling)
 	}
 }
 

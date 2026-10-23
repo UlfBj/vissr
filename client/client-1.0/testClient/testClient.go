@@ -338,8 +338,14 @@ func initUnixDomainSocket() net.Conn {
 	return conn
 }
 
+// getBrokerSocket returns the MQTT broker URL. The broker address is read from
+// the MQTT_BROKER_ADDR environment variable, defaulting to a local broker
+// (127.0.0.1). This matches the behavior of the server's mqttMgr.
 func getBrokerSocket(isSecure bool) string {
-	FVTAddr := "test.mosquitto.org"
+	FVTAddr := os.Getenv("MQTT_BROKER_ADDR")
+	if FVTAddr == "" {
+		FVTAddr = "127.0.0.1"
+	}
 	if isSecure == true {
 		return "ssl://" + FVTAddr + ":8883"
 	}
@@ -355,7 +361,7 @@ func mqttSubscribe(brokerSocket string, topic string) {
 	if token := c.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
-	if token := c.Subscribe(`"` + topic + `"`, 0, nil); token.Wait() && token.Error() != nil {
+	if token := c.Subscribe(topic, 0, nil); token.Wait() && token.Error() != nil {
 		fmt.Println(token.Error())
 		os.Exit(1)
 	}
@@ -389,7 +395,7 @@ var publishHandler MQTT.MessageHandler = func(client MQTT.Client, msg MQTT.Messa
 
 func publishVissV2Request(brokerSocket string, request string, clientTopic string, serverTopic string) {
 	payload := `{"topic":"` + clientTopic + `", "request":` + request + `}`
-	publishMessage(brokerSocket, "/" + serverTopic, payload)
+	publishMessage(brokerSocket, serverTopic, payload) // serverTopic already has the form /<VIN>/Vehicle
 }
 
 func publishMessage(brokerSocket string, topic string, payload string) {
@@ -425,7 +431,7 @@ func getVissV2Topic() string {
 	if vin == "" {
 		return "/VIN123/Vehicle"
 	}
-	fmt.Printf("getVissV2Topic: using MQTT_VIN env var, topic=/%s/Vehicle", vin)
+	fmt.Printf("getVissV2Topic: using MQTT_VIN env var, topic=/%s/Vehicle\n", vin)
 	return "/" + vin + "/Vehicle"
 }
 
@@ -461,6 +467,20 @@ func performGrpcCommand(vssRequest string, client pb.VISSClient) {
 	defer cancel()
 	switch reqMap["action"].(string) {
 	case "get":
+		if _, isMultiGet := reqMap["data"]; isMultiGet {
+			// VISSv3.2 Multiple Tree Addressability Read (CORE section
+			// 5.1.1.2): a top-level "data" array of paths, dispatched to
+			// the additive MultiGetRequest RPC instead of GetRequest.
+			pbRequest := utils.MultiGetRequestJsonToPb(vssRequest)
+			pbResponse, err := client.MultiGetRequest(ctx, pbRequest)
+			if err == nil {
+				vssResponse := utils.MultiGetResponsePbToJson(pbResponse)
+				fmt.Printf("Response:%s\n\n", vssResponse)
+			} else {
+				fmt.Printf("Response error:%s\n", err)
+			}
+			break
+		}
 		pbRequest := utils.GetRequestJsonToPb(vssRequest)
 		pbResponse, err := client.GetRequest(ctx, pbRequest)
 		if err == nil {
@@ -470,10 +490,33 @@ func performGrpcCommand(vssRequest string, client pb.VISSClient) {
 			fmt.Printf("Response error:%s\n", err)
 		}
 	case "set":
+		if _, isMultiSet := reqMap["data"]; isMultiSet {
+			// VISSv3.2 Multiple Data Update (CORE section 5.2.2): a
+			// top-level "data" array of {path,value} objects, dispatched
+			// to the additive MultiSetRequest RPC instead of SetRequest.
+			pbRequest := utils.MultiSetRequestJsonToPb(vssRequest)
+			pbResponse, err := client.MultiSetRequest(ctx, pbRequest)
+			if err == nil {
+				vssResponse := utils.SetResponsePbToJson(pbResponse)
+				fmt.Printf("Response:%s\n\n", vssResponse)
+			} else {
+				fmt.Printf("Response error:%s\n", err)
+			}
+			break
+		}
 		pbRequest := utils.SetRequestJsonToPb(vssRequest)
 		pbResponse, err := client.SetRequest(ctx, pbRequest)
 		if err == nil {
 			vssResponse := utils.SetResponsePbToJson(pbResponse)
+			fmt.Printf("Response:%s\n\n", vssResponse)
+		} else {
+			fmt.Printf("Response error:%s\n", err)
+		}
+	case "discover":
+		pbRequest := utils.DiscoverRequestJsonToPb(vssRequest)
+		pbResponse, err := client.DiscoverRequest(ctx, pbRequest)
+		if err == nil {
+			vssResponse := utils.DiscoverResponsePbToJson(pbResponse)
 			fmt.Printf("Response:%s\n\n", vssResponse)
 		} else {
 			fmt.Printf("Response error:%s\n", err)

@@ -108,8 +108,7 @@ func initChannels() {
 //   - The log message said "wsmgr:Event dropped" - misleading for the UDS
 //     manager.
 //
-// transportMgrChan retained for signature compatibility with httpMgr / wsMgr.
-func RemoveRoutingForwardResponse(response string, transportMgrChan chan string) {
+func RemoveRoutingForwardResponse(response string) {
 	trimmedResponse, clientId := utils.RemoveInternalData(response)
 	if clientId < 0 || clientId >= NUMOFUDSCLIENTS {
 		utils.Error.Printf("udsMgr:RemoveRoutingForwardResponse: invalid clientId=%d (response=%q); dropping", clientId, trimmedResponse)
@@ -156,7 +155,13 @@ func getDcConfig(reqMessage string) (string, string, bool, bool) {
 	singlePath := false
 	dcValue = getValueForKey(reqMessage, `"dc"`)
 	isGet = strings.Contains(reqMessage, `"get"`)
-	singlePath = !strings.Contains(reqMessage, `"paths"`)
+	// A request addresses multiple paths either via the pre-existing
+	// "paths" filter variant, or (VISSv3.2) via a top-level "data" array
+	// in a Multiple Tree Addressability Read request (CORE section
+	// 5.1.1.2). Either way the response will contain more than one
+	// {path,dp} element, so path compression must not be applied the
+	// same way as for a genuinely single-path get.
+	singlePath = !strings.Contains(reqMessage, `"paths"`) && !strings.Contains(reqMessage, `"data"`)
 	payloadId = getValueForKey(reqMessage, `"requestId"`)
 	return dcValue, payloadId, isGet, singlePath
 }
@@ -581,11 +586,11 @@ func returnUdsClientIndex(index int) {
 // handleUdsTransportResponse processes a single response coming back
 // from the server core. Extracted from UdsMgrInit's for/select loop so
 // the response path can be unit-tested independently of the goroutine
-// machinery — see udsMgr_dispatch_test.go.
-func handleUdsTransportResponse(respMessage string, transportMgrChan chan string) {
+// machinery - see udsMgr_dispatch_test.go.
+func handleUdsTransportResponse(respMessage string) {
 	utils.Info.Printf("UDS mgr hub: Response from server core:%s", respMessage)
 	respMessage = checkCompressionResponse(respMessage)
-	RemoveRoutingForwardResponse(respMessage, transportMgrChan)
+	RemoveRoutingForwardResponse(respMessage)
 }
 
 // handleUdsClientRequest processes a single inbound UDS-client
@@ -594,7 +599,7 @@ func handleUdsTransportResponse(respMessage string, transportMgrChan chan string
 // (kill-bypass / validation-error / compression-tagged / forward)
 // previously lived inline at the bottom of UdsMgrInit; it now lives
 // here as a named function.
-func handleUdsClientRequest(reqMessage string, mgrId int, clientId int, transportMgrChan chan string) {
+func handleUdsClientRequest(reqMessage string, mgrId int, clientId int, requestChan chan string) {
 	if !isKillSubscriptions(reqMessage) {
 		validationError := utils.JsonSchemaValidate(reqMessage)
 		if len(validationError) > 0 {
@@ -616,7 +621,7 @@ func handleUdsClientRequest(reqMessage string, mgrId int, clientId int, transpor
 		}
 		checkCompressionRequest(reqMessage)
 	}
-	utils.AddRoutingForwardRequest(reqMessage, mgrId, clientId, transportMgrChan)
+	utils.AddRoutingForwardRequest(reqMessage, mgrId, clientId, requestChan)
 }
 
 // isKillSubscriptions parses the message and returns true only when the
@@ -636,7 +641,7 @@ func isKillSubscriptions(reqMessage string) bool {
 	return action == "internal-killsubscriptions"
 }
 
-func UdsMgrInit(mgrId int, transportMgrChan chan string) {
+func UdsMgrInit(mgrId int, requestChan chan string, responseChan chan string) {
 	var reqMessage string
 	var clientId int
 	utils.ReadTransportSecConfig()
@@ -648,8 +653,8 @@ func UdsMgrInit(mgrId int, transportMgrChan chan string) {
 
 	for {
 		select {
-		case respMessage := <-transportMgrChan:
-			handleUdsTransportResponse(respMessage, transportMgrChan)
+		case respMessage := <-responseChan:
+			handleUdsTransportResponse(respMessage)
 			continue
 		// NOTE: the case list below is hand-coupled to NUMOFUDSCLIENTS. If
 		// NUMOFUDSCLIENTS changes, this select must change to match - extend
@@ -695,7 +700,7 @@ func UdsMgrInit(mgrId int, transportMgrChan chan string) {
 		case reqMessage = <-udsClientChan[19]:
 			clientId = 19
 		}
-		handleUdsClientRequest(reqMessage, mgrId, clientId, transportMgrChan)
+		handleUdsClientRequest(reqMessage, mgrId, clientId, requestChan)
 	}
 }
 

@@ -10,6 +10,7 @@
 package wsMgr
 
 import (
+	"encoding/json"
 	utils "github.com/covesa/vissr/utils"
 	"strings"
 	"strconv"
@@ -55,7 +56,7 @@ func initChannels() {
 	clientBackendChan[i] = make(chan string)
 	}
 }
-func RemoveRoutingForwardResponse(response string, transportMgrChan chan string) {
+func RemoveRoutingForwardResponse(response string) {
 	trimmedResponse, clientId := utils.RemoveInternalData(response)
 	if strings.Contains(trimmedResponse, "\"subscription\"") {
 		select {
@@ -91,7 +92,13 @@ func getDcConfig(reqMessage string) (string, string, bool, bool) {
 	singlePath := false
 	dcValue = getValueForKey(reqMessage, `"dc"`)
 	isGet = strings.Contains(reqMessage, `"get"`)
-	singlePath = !strings.Contains(reqMessage, `"paths"`)
+	// A request addresses multiple paths either via the pre-existing
+	// "paths" filter variant, or (VISSv3.2) via a top-level "data" array
+	// in a Multiple Tree Addressability Read request (CORE section
+	// 5.1.1.2). Either way the response will contain more than one
+	// {path,dp} element, so path compression must not be applied the
+	// same way as for a genuinely single-path get.
+	singlePath = !strings.Contains(reqMessage, `"paths"`) && !strings.Contains(reqMessage, `"data"`)
 	payloadId = getValueForKey(reqMessage, `"requestId"`)
 	return dcValue, payloadId, isGet, singlePath
 }
@@ -396,20 +403,35 @@ func compressPaths(respMessage string, sortedList []string) string {
 // core: applies compression-response post-processing and forwards to
 // the connected WS client via RemoveRoutingForwardResponse. Extracted
 // from WsMgrInit's for/select loop so the response path can be unit-
-// tested independently of the goroutine machinery — see
+// tested independently of the goroutine machinery - see
 // wsMgr_dispatch_test.go.
-func handleWsTransportResponse(respMessage string, transportMgrChan chan string) {
+func handleWsTransportResponse(respMessage string) {
 	utils.Info.Printf("WS mgr hub: Response from server core:%s", respMessage)
 	respMessage = checkCompressionResponse(respMessage)
-	RemoveRoutingForwardResponse(respMessage, transportMgrChan)
+	RemoveRoutingForwardResponse(respMessage)
 }
 
 // handleWsClientRequest processes a single inbound WS-client request.
 // Extracted from WsMgrInit so the validation / compression /
 // forwarding behaviour can be unit-tested. Matches the shape of
 // handleUdsClientRequest in udsMgr (see PR #124).
-func handleWsClientRequest(reqMessage string, mgrId int, clientId int, transportMgrChan chan string) {
-	if !strings.Contains(reqMessage, `"internal-killsubscriptions"`) {
+// isKillSubscriptions reports whether reqMessage is the manager's own "internal-killsubscriptions" message,
+// which is forwarded without a schema check. It is decided by the action of the message. Looking for the
+// text of the action anywhere in the message, as was done before, let a client put that text in any field
+// of an otherwise invalid request, and have the request forwarded to the core without being validated.
+// The message is decoded the way the server core decodes it, so both agree on what the action is.
+func isKillSubscriptions(reqMessage string) bool {
+	var msg map[string]interface{}
+	decoder := json.NewDecoder(strings.NewReader(reqMessage))
+	if err := decoder.Decode(&msg); err != nil || decoder.More() {
+		return false
+	}
+	action, ok := msg["action"].(string)
+	return ok && action == "internal-killsubscriptions"
+}
+
+func handleWsClientRequest(reqMessage string, mgrId int, clientId int, requestChan chan string) {
+	if !isKillSubscriptions(reqMessage) {
 		validationError := utils.JsonSchemaValidate(reqMessage)
 		if len(validationError) > 0 {
 			requestMap := make(map[string]interface{})
@@ -421,10 +443,10 @@ func handleWsClientRequest(reqMessage string, mgrId int, clientId int, transport
 		}
 		checkCompressionRequest(reqMessage)
 	}
-	utils.AddRoutingForwardRequest(reqMessage, mgrId, clientId, transportMgrChan)
+	utils.AddRoutingForwardRequest(reqMessage, mgrId, clientId, requestChan)
 }
 
-func WsMgrInit(mgrId int, transportMgrChan chan string) {
+func WsMgrInit(mgrId int, requestChan chan string, responseChan chan string) {
 	var reqMessage string
 	var clientId int
 	utils.ReadTransportSecConfig()
@@ -436,8 +458,8 @@ func WsMgrInit(mgrId int, transportMgrChan chan string) {
 
 	for {
 		select {
-		case respMessage := <-transportMgrChan:
-			handleWsTransportResponse(respMessage, transportMgrChan)
+		case respMessage := <-responseChan:
+			handleWsTransportResponse(respMessage)
 			continue
 		case reqMessage = <-wsClientChan[0]: clientId = 0
 		case reqMessage = <-wsClientChan[1]: clientId = 1
@@ -460,6 +482,6 @@ func WsMgrInit(mgrId int, transportMgrChan chan string) {
 		case reqMessage = <-wsClientChan[18]: clientId = 18
 		case reqMessage = <-wsClientChan[19]: clientId = 19
 		}
-		handleWsClientRequest(reqMessage, mgrId, clientId, transportMgrChan)
+		handleWsClientRequest(reqMessage, mgrId, clientId, requestChan)
 	}
 }
